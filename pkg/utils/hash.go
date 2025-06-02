@@ -2,6 +2,7 @@ package utils
 
 import (
 	"encoding/binary"
+
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/xmtp/xmtpd/pkg/constants"
 )
@@ -29,4 +30,8 @@ func HashOriginatorSignatureInput(unsignedOriginatorEnvelope []byte) []byte {
 		[]byte(constants.ORIGINATOR_DOMAIN_SEPARATION_LABEL),
 		unsignedOriginatorEnvelope,
 	)
+}
+
+func HashPayerReportInput(packedBytes []byte) []byte {
+	return ethcrypto.Keccak256(packedBytes)
 }

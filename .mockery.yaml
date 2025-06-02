@@ -4,6 +4,9 @@ outpkg: "{{.PackageName}}"
 dir: "pkg/mocks/{{.PackageName}}"
 filename: "mock_{{.InterfaceName}}.go"
 packages:
+  github.com/xmtp/xmtpd/pkg/proto/xmtpv4/message_api:
+    interfaces:
+      ReplicationApi_SubscribeEnvelopesClient:
   github.com/xmtp/xmtpd/pkg/proto/xmtpv4/metadata_api:
     interfaces:
       MetadataApiClient:
@@ -21,17 +24,19 @@ packages:
       ValidationApiClient:
   github.com/xmtp/xmtpd/pkg/registry:
     interfaces:
-      NodesContract:
       NodeRegistry:
-  github.com/xmtp/xmtpd/pkg/indexer:
+      NodeRegistryContract:
+  github.com/xmtp/xmtpd/pkg/indexer/common:
     interfaces:
       IBlockTracker:
-      ChainReorgHandler:
+      IReorgHandler:
+      ILogStorer:
+      IContract:
   github.com/xmtp/xmtpd/pkg/blockchain:
     interfaces:
       ChainClient:
       IBlockchainPublisher:
       NonceManager:
-  github.com/xmtp/xmtpd/pkg/indexer/storer:
+  github.com/xmtp/xmtpd/pkg/errors:
     interfaces:
-      LogStorer:
+      RetryableError:

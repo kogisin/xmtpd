@@ -3,6 +3,9 @@ package payer
 import (
 	"context"
 	"errors"
+	"time"
+
+	"github.com/xmtp/xmtpd/pkg/metrics"
 	"github.com/xmtp/xmtpd/pkg/proto/xmtpv4/metadata_api"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
@@ -33,17 +36,23 @@ type NodeCursorTracker struct {
 }
 
 func NewNodeCursorTracker(ctx context.Context,
-	log *zap.Logger, metadataApiClient MetadataApiClientConstructor) *NodeCursorTracker {
+	log *zap.Logger, metadataApiClient MetadataApiClientConstructor,
+) *NodeCursorTracker {
 	return &NodeCursorTracker{ctx: ctx, log: log, metadataApiClient: metadataApiClient}
 }
 
 func (ct *NodeCursorTracker) BlockUntilDesiredCursorReached(
-	ctx context.Context,
+	parentCtx context.Context,
 	nodeId uint32,
 	desiredOriginatorId uint32,
 	desiredSequenceId uint64,
 ) error {
 	// TODO(mkysel) ideally we wouldn't create and tear down the stream for every request
+
+	ctx, cancel := context.WithTimeout(parentCtx, 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
 
 	client, err := ct.metadataApiClient.NewMetadataApiClient(nodeId)
 	if err != nil {
@@ -75,15 +84,23 @@ func (ct *NodeCursorTracker) BlockUntilDesiredCursorReached(
 	for {
 		select {
 		case <-ct.ctx.Done():
-			return status.Errorf(codes.Internal, "node terminated. Cancelled wait for cursor")
+			return status.Errorf(codes.Aborted, "node terminated. Cancelled wait for cursor")
 		case <-ctx.Done():
-			return nil
+			// client has shut down
+			if parentCtx.Err() != nil {
+				return nil
+			}
+			return status.Errorf(
+				codes.DeadlineExceeded,
+				"Wait for cursor was unsuccessful after %s",
+				time.Since(start),
+			)
 		case err := <-errCh:
 			if errors.Is(ctx.Err(), context.Canceled) {
 				return nil
 			}
 			if errors.Is(ct.ctx.Err(), context.Canceled) {
-				return status.Errorf(codes.Internal, "node terminated. Cancelled wait for cursor")
+				return status.Errorf(codes.Aborted, "node terminated. Cancelled wait for cursor")
 			}
 			return err
 		case resp := <-respCh:
@@ -98,6 +115,10 @@ func (ct *NodeCursorTracker) BlockUntilDesiredCursorReached(
 			}
 
 			if seqId >= desiredSequenceId {
+				metrics.EmitPayerBlockUntilDesiredCursorReached(
+					desiredOriginatorId,
+					time.Since(start).Seconds(),
+				)
 				return nil
 			}
 		}

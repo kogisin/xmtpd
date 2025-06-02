@@ -2,8 +2,12 @@ package authn
 
 import (
 	"fmt"
+
+	"github.com/xmtp/xmtpd/pkg/metrics"
+
 	"github.com/Masterminds/semver/v3"
 	"github.com/golang-jwt/jwt/v5"
+	"go.uber.org/zap"
 )
 
 type XmtpdClaims struct {
@@ -14,17 +18,17 @@ type ClaimValidator struct {
 	constraint semver.Constraints
 }
 
-func NewClaimValidator(serverVersion *semver.Version) (*ClaimValidator, error) {
+func NewClaimValidator(logger *zap.Logger, serverVersion *semver.Version) (*ClaimValidator, error) {
 	if serverVersion == nil {
 		return nil, fmt.Errorf("serverVersion is nil")
 	}
-	sanitizedVersion, err := serverVersion.SetPrerelease("")
-	if err != nil {
-		return nil, err
-	}
 
 	// https://github.com/Masterminds/semver?tab=readme-ov-file#caret-range-comparisons-major
-	constraintStr := fmt.Sprintf("^%s", sanitizedVersion.String())
+	constraintStr := fmt.Sprintf("^%d.%d", serverVersion.Major(), serverVersion.Minor())
+	logger.Debug(
+		"Using semver constraint for sync compatibility",
+		zap.String("constraint", constraintStr),
+	)
 
 	constraint, err := semver.NewConstraint(constraintStr)
 	if err != nil {
@@ -33,9 +37,10 @@ func NewClaimValidator(serverVersion *semver.Version) (*ClaimValidator, error) {
 
 	return &ClaimValidator{constraint: *constraint}, nil
 }
-func (cv *ClaimValidator) ValidateVersionClaimIsCompatible(claims *XmtpdClaims) error {
+
+func (cv *ClaimValidator) ValidateVersionClaimIsCompatible(claims *XmtpdClaims) (CloseFunc, error) {
 	if claims.Version == nil {
-		return nil
+		return emptyClose, nil
 	}
 
 	// SemVer implementations generally do not consider pre-releases to be valid next releases
@@ -43,11 +48,19 @@ func (cv *ClaimValidator) ValidateVersionClaimIsCompatible(claims *XmtpdClaims) 
 	// see discussion in https://github.com/Masterminds/semver/issues/21
 	sanitizedVersion, err := claims.Version.SetPrerelease("")
 	if err != nil {
-		return err
-	}
-	if ok := cv.constraint.Check(&sanitizedVersion); !ok {
-		return fmt.Errorf("serverVersion %s is not compatible", *claims.Version)
+		return emptyClose, err
 	}
 
-	return nil
+	metrics.EmitNewConnectionRequestVersion(sanitizedVersion.String())
+
+	if ok := cv.constraint.Check(&sanitizedVersion); !ok {
+		return emptyClose, fmt.Errorf("serverVersion %s is not compatible", *claims.Version)
+	}
+
+	tracker := metrics.NewIncomingConnectionTracker(sanitizedVersion.String())
+	tracker.Open()
+
+	return func() {
+		tracker.Close()
+	}, nil
 }

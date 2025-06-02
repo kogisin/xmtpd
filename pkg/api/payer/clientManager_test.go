@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
+
 	"github.com/stretchr/testify/require"
 	"github.com/xmtp/xmtpd/pkg/api/payer"
 	"github.com/xmtp/xmtpd/pkg/registry"
@@ -20,10 +22,8 @@ func formatAddress(addr string) string {
 }
 
 func TestClientManager(t *testing.T) {
-	server1, _, _, cleanup1 := apiTestUtils.NewTestAPIServer(t)
-	defer cleanup1()
-	server2, _, _, cleanup2 := apiTestUtils.NewTestAPIServer(t)
-	defer cleanup2()
+	server1, _, _ := apiTestUtils.NewTestAPIServer(t)
+	server2, _, _ := apiTestUtils.NewTestAPIServer(t)
 
 	nodeRegistry := registry.NewFixedNodeRegistry([]registry.Node{
 		{
@@ -36,7 +36,7 @@ func TestClientManager(t *testing.T) {
 		},
 	})
 
-	cm := payer.NewClientManager(testutils.NewLog(t), nodeRegistry)
+	cm := payer.NewClientManager(testutils.NewLog(t), nodeRegistry, prometheus.NewClientMetrics())
 
 	client1, err := cm.GetClient(100)
 	require.NoError(t, err)
@@ -56,5 +56,4 @@ func TestClientManager(t *testing.T) {
 
 	_, err = cm.GetClient(300)
 	require.Error(t, err)
-
 }

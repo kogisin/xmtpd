@@ -3,11 +3,17 @@ package payer
 import (
 	"context"
 	"crypto/ecdsa"
+	"math"
+	"math/rand"
 	"time"
 
+	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
+
+	"github.com/xmtp/xmtpd/pkg/metrics"
+
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/xmtp/xmtpd/contracts/pkg/groupmessages"
-	"github.com/xmtp/xmtpd/contracts/pkg/identityupdates"
+	gm "github.com/xmtp/xmtpd/pkg/abi/groupmessagebroadcaster"
+	iu "github.com/xmtp/xmtpd/pkg/abi/identityupdatebroadcaster"
 	"github.com/xmtp/xmtpd/pkg/blockchain"
 	"github.com/xmtp/xmtpd/pkg/constants"
 	"github.com/xmtp/xmtpd/pkg/envelopes"
@@ -34,23 +40,30 @@ type Service struct {
 	payerPrivateKey     *ecdsa.PrivateKey
 	nodeSelector        NodeSelectorAlgorithm
 	nodeCursorTracker   *NodeCursorTracker
+	nodeRegistry        registry.NodeRegistry
 }
 
 func NewPayerApiService(
 	ctx context.Context,
 	log *zap.Logger,
-	registry registry.NodeRegistry,
+	nodeRegistry registry.NodeRegistry,
 	payerPrivateKey *ecdsa.PrivateKey,
 	blockchainPublisher blockchain.IBlockchainPublisher,
 	metadataApiClient MetadataApiClientConstructor,
+	clientMetrics *grpcprom.ClientMetrics,
 ) (*Service, error) {
+	if clientMetrics == nil {
+		clientMetrics = grpcprom.NewClientMetrics()
+	}
+
 	var metadataClient MetadataApiClientConstructor
-	clientManager := NewClientManager(log, registry)
+	clientManager := NewClientManager(log, nodeRegistry, clientMetrics)
 	if metadataApiClient == nil {
 		metadataClient = &DefaultMetadataApiClientConstructor{clientManager: clientManager}
 	} else {
 		metadataClient = metadataApiClient
 	}
+
 	return &Service{
 		ctx:                 ctx,
 		log:                 log,
@@ -58,8 +71,56 @@ func NewPayerApiService(
 		payerPrivateKey:     payerPrivateKey,
 		blockchainPublisher: blockchainPublisher,
 		nodeCursorTracker:   NewNodeCursorTracker(ctx, log, metadataClient),
-		nodeSelector:        &StableHashingNodeSelectorAlgorithm{reg: registry},
+		nodeSelector:        &StableHashingNodeSelectorAlgorithm{reg: nodeRegistry},
+		nodeRegistry:        nodeRegistry,
 	}, nil
+}
+
+// GetReaderNode returns a reader node and a list of backup nodes.
+// For now, the reader node is chosen randomly from the list of nodes.
+// In the future, different algorithms can be implemented and selected in the request.
+func (s *Service) GetReaderNode(
+	ctx context.Context,
+	req *payer_api.GetReaderNodeRequest,
+) (resp *payer_api.GetReaderNodeResponse, err error) {
+	var nodes []registry.Node
+
+	defer func() {
+		metrics.EmitPayerGetReaderNodeAvailableNodes(len(nodes))
+	}()
+
+	nodes, err = s.nodeRegistry.GetNodes()
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "failed to fetch nodes: %v", err)
+	}
+
+	if len(nodes) == 0 {
+		return nil, status.Errorf(codes.Unavailable, "no nodes available")
+	}
+
+	primaryUrl, backupUrls := getReaderNodeRandom(nodes)
+
+	return &payer_api.GetReaderNodeResponse{
+		ReaderNodeUrl:  primaryUrl,
+		BackupNodeUrls: backupUrls,
+	}, nil
+}
+
+func getReaderNodeRandom(nodes []registry.Node) (string, []string) {
+	shuffled := make([]registry.Node, len(nodes))
+	copy(shuffled, nodes)
+	rand.Shuffle(len(shuffled), func(i, j int) {
+		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+	})
+
+	primaryUrl := shuffled[0].HttpAddress
+
+	backupUrls := make([]string, 0, len(shuffled)-1)
+	for _, node := range shuffled[1:] {
+		backupUrls = append(backupUrls, node.HttpAddress)
+	}
+
+	return primaryUrl, backupUrls
 }
 
 func (s *Service) PublishClientEnvelopes(
@@ -173,13 +234,16 @@ func (s *Service) publishToNodeWithRetry(
 	var banlist []uint32
 	var result []*envelopesProto.OriginatorEnvelope
 	var err error
-	var nodeID = originatorID
+	nodeID := originatorID
 
 	topic := indexedEnvelopes[0].payload.TargetTopic()
 
 	for retries := 0; retries < 5; retries++ {
 		result, err = s.publishToNodes(ctx, nodeID, indexedEnvelopes)
 		if err == nil {
+			if retries != 0 {
+				metrics.EmitPayerBanlistRetries(originatorID, retries)
+			}
 			return result, nil
 		}
 
@@ -218,6 +282,7 @@ func (s *Service) publishToNodes(
 		return nil, status.Errorf(codes.Internal, "error signing payer envelopes: %v", err)
 	}
 
+	start := time.Now()
 	resp, err := client.PublishPayerEnvelopes(ctx, &message_api.PublishPayerEnvelopesRequest{
 		PayerEnvelopes: payerEnvelopes,
 	})
@@ -225,6 +290,8 @@ func (s *Service) publishToNodes(
 		return nil, status.Errorf(codes.Internal, "error publishing payer envelopes: %v", err)
 	}
 
+	metrics.EmitPayerNodePublishDuration(originatorID, time.Since(start).Seconds())
+	metrics.EmitPayerMessageOriginated(originatorID, len(payerEnvelopes))
 	return resp.OriginatorEnvelopes, nil
 }
 
@@ -234,7 +301,7 @@ func (s *Service) publishToBlockchain(
 ) (*envelopesProto.OriginatorEnvelope, error) {
 	targetTopic := clientEnvelope.TargetTopic()
 	identifier := targetTopic.Identifier()
-	desiredOriginatorId := uint32(1) //TODO: determine this from the chain
+	desiredOriginatorId := uint32(1) // TODO: determine this from the chain
 	var desiredSequenceId uint64
 	kind := targetTopic.Kind()
 
@@ -258,12 +325,17 @@ func (s *Service) publishToBlockchain(
 		)
 	}
 
+	start := time.Now()
+
 	var unsignedOriginatorEnvelope *envelopesProto.UnsignedOriginatorEnvelope
 	var hash common.Hash
 	switch kind {
 	case topic.TOPIC_KIND_GROUP_MESSAGES_V1:
-		var logMessage *groupmessages.GroupMessagesMessageSent
-		if logMessage, err = s.blockchainPublisher.PublishGroupMessage(ctx, idBytes, payload); err != nil {
+		var logMessage *gm.GroupMessageBroadcasterMessageSent
+
+		if logMessage, err = metrics.MeasurePublishToBlockchainMethod("group_message", func() (*gm.GroupMessageBroadcasterMessageSent, error) {
+			return s.blockchainPublisher.PublishGroupMessage(ctx, idBytes, payload)
+		}); err != nil {
 			return nil, status.Errorf(codes.Internal, "error publishing group message: %v", err)
 		}
 		if logMessage == nil {
@@ -286,8 +358,10 @@ func (s *Service) publishToBlockchain(
 		desiredSequenceId = logMessage.SequenceId
 
 	case topic.TOPIC_KIND_IDENTITY_UPDATES_V1:
-		var logMessage *identityupdates.IdentityUpdatesIdentityUpdateCreated
-		if logMessage, err = s.blockchainPublisher.PublishIdentityUpdate(ctx, idBytes, payload); err != nil {
+		var logMessage *iu.IdentityUpdateBroadcasterIdentityUpdateCreated
+		if logMessage, err = metrics.MeasurePublishToBlockchainMethod("identity_update", func() (*iu.IdentityUpdateBroadcasterIdentityUpdateCreated, error) {
+			return s.blockchainPublisher.PublishIdentityUpdate(ctx, idBytes, payload)
+		}); err != nil {
 			return nil, status.Errorf(codes.Internal, "error publishing identity update: %v", err)
 		}
 		if logMessage == nil {
@@ -317,6 +391,14 @@ func (s *Service) publishToBlockchain(
 		)
 	}
 
+	metrics.EmitPayerNodePublishDuration(desiredOriginatorId, time.Since(start).Seconds())
+	metrics.EmitPayerMessageOriginated(desiredOriginatorId, 1)
+
+	s.log.Debug(
+		"published message to blockchain",
+		zap.Float64("seconds", time.Since(start).Seconds()),
+	)
+
 	unsignedBytes, err := proto.Marshal(unsignedOriginatorEnvelope)
 	if err != nil {
 		return nil, status.Errorf(
@@ -339,6 +421,11 @@ func (s *Service) publishToBlockchain(
 		targetNodeId = node
 	}
 
+	s.log.Debug(
+		"Waiting for message to be processed by node",
+		zap.Uint32("target_node_id", targetNodeId),
+	)
+
 	err = s.nodeCursorTracker.BlockUntilDesiredCursorReached(
 		ctx,
 		targetNodeId,
@@ -349,6 +436,7 @@ func (s *Service) publishToBlockchain(
 		s.log.Error(
 			"Chosen node for cursor check is unreachable",
 			zap.Uint32("targetNodeId", targetNodeId),
+			zap.Error(err),
 		)
 	}
 
@@ -410,12 +498,19 @@ func (s *Service) signClientEnvelope(originatorID uint32,
 		return nil, err
 	}
 
+	retentionDays := uint32(math.MaxUint32)
+
+	if !clientEnvelope.Aad().IsCommit {
+		retentionDays = constants.DEFAULT_STORAGE_DURATION_DAYS
+	}
+
 	return &envelopesProto.PayerEnvelope{
 		UnsignedClientEnvelope: envelopeBytes,
 		PayerSignature: &associations.RecoverableEcdsaSignature{
 			Bytes: payerSignature,
 		},
-		TargetOriginator: originatorID,
+		TargetOriginator:     originatorID,
+		MessageRetentionDays: retentionDays,
 	}, nil
 }
 

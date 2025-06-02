@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -12,7 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/xmtp/xmtpd/contracts/pkg/nodes"
+	"github.com/xmtp/xmtpd/pkg/abi/noderegistry"
 	"github.com/xmtp/xmtpd/pkg/config"
 	"go.uber.org/zap"
 )
@@ -33,7 +34,7 @@ Given how infrequently this list changes, that trade-off seems acceptable.
 type SmartContractRegistry struct {
 	ctx      context.Context
 	wg       sync.WaitGroup
-	contract NodesContract
+	contract NodeRegistryContract
 	logger   *zap.Logger
 	// How frequently to poll the smart contract
 	refreshInterval time.Duration
@@ -56,12 +57,10 @@ func NewSmartContractRegistry(
 	logger *zap.Logger,
 	options config.ContractsOptions,
 ) (*SmartContractRegistry, error) {
-
-	contract, err := nodes.NewNodesCaller(
-		common.HexToAddress(options.NodesContractAddress),
+	contract, err := noderegistry.NewNodeRegistryCaller(
+		common.HexToAddress(options.SettlementChain.NodeRegistryAddress),
 		ethclient,
 	)
-
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +70,7 @@ func NewSmartContractRegistry(
 	return &SmartContractRegistry{
 		ctx:                  ctx,
 		contract:             contract,
-		refreshInterval:      options.RegistryRefreshInterval,
+		refreshInterval:      options.SettlementChain.NodeRegistryRefreshInterval,
 		logger:               logger.Named("smartContractRegistry"),
 		newNodesNotifier:     newNotifier[[]Node](),
 		nodes:                make(map[uint32]Node),
@@ -160,7 +159,7 @@ func (s *SmartContractRegistry) refreshLoop() {
 func (s *SmartContractRegistry) refreshData() error {
 	fromContract, err := s.loadUnfilteredFromContract()
 	if err != nil {
-		return err
+		return fmt.Errorf("could not load nodes from contract: %v", err)
 	}
 
 	newNodes := []Node{}
@@ -228,15 +227,15 @@ func (s *SmartContractRegistry) loadUnfilteredFromContract() ([]Node, error) {
 	return out, nil
 }
 
-func (s *SmartContractRegistry) SetContractForTest(contract NodesContract) {
+func (s *SmartContractRegistry) SetContractForTest(contract NodeRegistryContract) {
 	s.contract = contract
 }
 
-func convertNode(rawNode nodes.INodesNodeWithId) Node {
+func convertNode(rawNode noderegistry.INodeRegistryNodeWithId) Node {
 	// Unmarshal the signing key.
 	// If invalid, mark the config as being invalid as well. Clients should treat the
 	// node as unhealthy in this case
-	signingKey, err := crypto.UnmarshalPubkey(rawNode.Node.SigningKeyPub)
+	signingKey, err := crypto.UnmarshalPubkey(rawNode.Node.SigningPublicKey)
 	isValidConfig := err == nil
 
 	httpAddress := rawNode.Node.HttpAddress
@@ -246,23 +245,20 @@ func convertNode(rawNode nodes.INodesNodeWithId) Node {
 		isValidConfig = false
 	}
 
-	if rawNode.Node.IsDisabled {
+	if !rawNode.Node.IsCanonical {
 		isValidConfig = false
 	}
 
 	return Node{
-		NodeID:               uint32(rawNode.NodeId.Uint64()),
-		SigningKey:           signingKey,
-		HttpAddress:          httpAddress,
-		IsReplicationEnabled: rawNode.Node.IsReplicationEnabled,
-		IsApiEnabled:         rawNode.Node.IsApiEnabled,
-		IsDisabled:           rawNode.Node.IsDisabled,
-		MinMonthlyFee:        rawNode.Node.MinMonthlyFee,
-		IsValidConfig:        isValidConfig,
+		NodeID:        rawNode.NodeId,
+		SigningKey:    signingKey,
+		HttpAddress:   httpAddress,
+		IsCanonical:   rawNode.Node.IsCanonical,
+		IsValidConfig: isValidConfig,
 	}
 }
 
-func (f *SmartContractRegistry) Stop() {
-	f.cancel()
-	f.wg.Wait()
+func (s *SmartContractRegistry) Stop() {
+	s.cancel()
+	s.wg.Wait()
 }

@@ -2,6 +2,9 @@ package testutils
 
 import (
 	"testing"
+	"time"
+
+	"github.com/xmtp/xmtpd/pkg/constants"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/require"
@@ -81,9 +84,10 @@ func CreateIdentityUpdateClientEnvelope(
 	}
 }
 
-func CreatePayerEnvelope(
+func CreatePayerEnvelopeWithExpiration(
 	t *testing.T,
 	nodeID uint32,
+	expirationDays uint32,
 	clientEnv ...*envelopes.ClientEnvelope,
 ) *envelopes.PayerEnvelope {
 	if len(clientEnv) == 0 {
@@ -104,14 +108,28 @@ func CreatePayerEnvelope(
 		PayerSignature: &associations.RecoverableEcdsaSignature{
 			Bytes: payerSignature,
 		},
-		TargetOriginator: nodeID,
+		TargetOriginator:     nodeID,
+		MessageRetentionDays: expirationDays,
 	}
 }
 
-func CreateOriginatorEnvelope(
+func CreatePayerEnvelope(
+	t *testing.T,
+	nodeID uint32,
+	clientEnv ...*envelopes.ClientEnvelope,
+) *envelopes.PayerEnvelope {
+	return CreatePayerEnvelopeWithExpiration(
+		t,
+		nodeID,
+		constants.DEFAULT_STORAGE_DURATION_DAYS,
+		clientEnv...)
+}
+
+func CreateOriginatorEnvelopeWithTimestamp(
 	t *testing.T,
 	originatorNodeID uint32,
 	originatorSequenceID uint64,
+	timestamp time.Time,
 	payerEnv ...*envelopes.PayerEnvelope,
 ) *envelopes.OriginatorEnvelope {
 	if len(payerEnv) == 0 {
@@ -124,7 +142,7 @@ func CreateOriginatorEnvelope(
 	unsignedEnv := &envelopes.UnsignedOriginatorEnvelope{
 		OriginatorNodeId:     originatorNodeID,
 		OriginatorSequenceId: originatorSequenceID,
-		OriginatorNs:         0,
+		OriginatorNs:         timestamp.UnixNano(),
 		PayerEnvelopeBytes:   marshaledPayerEnv,
 	}
 
@@ -135,6 +153,20 @@ func CreateOriginatorEnvelope(
 		UnsignedOriginatorEnvelope: unsignedBytes,
 		Proof:                      nil,
 	}
+}
+
+func CreateOriginatorEnvelope(
+	t *testing.T,
+	originatorNodeID uint32,
+	originatorSequenceID uint64,
+	payerEnv ...*envelopes.PayerEnvelope,
+) *envelopes.OriginatorEnvelope {
+	return CreateOriginatorEnvelopeWithTimestamp(
+		t,
+		originatorNodeID,
+		originatorSequenceID,
+		time.Unix(0, 0),
+		payerEnv...)
 }
 
 func CreateOriginatorEnvelopeWithTopic(

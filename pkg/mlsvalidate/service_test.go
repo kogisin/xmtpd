@@ -29,7 +29,8 @@ func TestValidateKeyPackages(t *testing.T) {
 		ValidateInboxIdKeyPackages(mock.Anything, mock.Anything).
 		Times(1).
 		Return(&proto.ValidateInboxIdKeyPackagesResponse{
-			Responses: []*proto.ValidateInboxIdKeyPackagesResponse_Response{&mockResponse}},
+			Responses: []*proto.ValidateInboxIdKeyPackagesResponse_Response{&mockResponse},
+		},
 			nil,
 		)
 
@@ -55,7 +56,7 @@ func TestGetAssociationState(t *testing.T) {
 		},
 		StateDiff: &associations.AssociationStateDiff{
 			NewMembers: []*associations.MemberIdentifier{{
-				Kind: &associations.MemberIdentifier_Address{Address: address},
+				Kind: &associations.MemberIdentifier_EthereumAddress{EthereumAddress: address},
 			}},
 		},
 	}
@@ -72,5 +73,5 @@ func TestGetAssociationState(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, inboxId, res.AssociationState.InboxId)
-	require.Equal(t, address, res.StateDiff.NewMembers[0].GetAddress())
+	require.Equal(t, address, res.StateDiff.NewMembers[0].GetEthereumAddress())
 }

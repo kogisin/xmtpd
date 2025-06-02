@@ -2,18 +2,18 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
+	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
+	"github.com/pires/go-proxyproto"
 	"github.com/xmtp/xmtpd/pkg/authn"
 	"github.com/xmtp/xmtpd/pkg/interceptors/server"
-
-	"google.golang.org/grpc/reflection"
-
-	prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
-	"github.com/pires/go-proxyproto"
 	"github.com/xmtp/xmtpd/pkg/tracing"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -21,10 +21,7 @@ import (
 	"google.golang.org/grpc/health"
 	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
-)
-
-var (
-	prometheusOnce sync.Once
+	"google.golang.org/grpc/reflection"
 )
 
 type RegistrationFunc func(server *grpc.Server) error
@@ -32,6 +29,7 @@ type RegistrationFunc func(server *grpc.Server) error
 type ApiServer struct {
 	ctx          context.Context
 	grpcListener net.Listener
+	httpListener net.Listener
 	grpcServer   *grpc.Server
 	log          *zap.Logger
 	wg           sync.WaitGroup
@@ -41,40 +39,62 @@ func NewAPIServer(
 	ctx context.Context,
 	log *zap.Logger,
 	listenAddress string,
+	httpListenAddress string,
 	enableReflection bool,
 	registrationFunc RegistrationFunc,
+	httpRegistrationFunc HttpRegistrationFunc,
 	jwtVerifier authn.JWTVerifier,
+	registry *prometheus.Registry,
 ) (*ApiServer, error) {
 	grpcListener, err := net.Listen("tcp", listenAddress)
-
 	if err != nil {
 		return nil, err
 	}
+
+	httpListener, err := net.Listen("tcp", httpListenAddress)
+	if err != nil {
+		return nil, err
+	}
+
 	s := &ApiServer{
 		ctx: ctx,
 		grpcListener: &proxyproto.Listener{
 			Listener:          grpcListener,
 			ReadHeaderTimeout: 10 * time.Second,
 		},
-		log: log.Named("api"),
-		wg:  sync.WaitGroup{},
+		httpListener: httpListener,
+		log:          log.Named("api"),
+		wg:           sync.WaitGroup{},
 	}
 	s.log.Info("Creating API server")
-
-	prometheusOnce.Do(func() {
-		prometheus.EnableHandlingTimeHistogram()
-	})
 
 	loggingInterceptor, err := server.NewLoggingInterceptor(log)
 	if err != nil {
 		return nil, err
 	}
 
+	openConnectionsInterceptor, err := server.NewOpenConnectionsInterceptor()
+	if err != nil {
+		return nil, err
+	}
+
+	srvMetrics := grpcprom.NewServerMetrics(
+		grpcprom.WithServerHandlingTimeHistogram(
+			grpcprom.WithHistogramBuckets(
+				[]float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
+			),
+		))
+	registry.MustRegister(srvMetrics)
+
 	unary := []grpc.UnaryServerInterceptor{
-		prometheus.UnaryServerInterceptor,
+		srvMetrics.UnaryServerInterceptor(),
+		openConnectionsInterceptor.Unary(),
+		loggingInterceptor.Unary(),
 	}
 	stream := []grpc.StreamServerInterceptor{
-		prometheus.StreamServerInterceptor,
+		srvMetrics.StreamServerInterceptor(),
+		openConnectionsInterceptor.Stream(),
+		loggingInterceptor.Stream(),
 	}
 
 	if jwtVerifier != nil {
@@ -94,9 +114,6 @@ func NewAPIServer(
 			PermitWithoutStream: true,
 			MinTime:             15 * time.Second,
 		}),
-		grpc.ChainUnaryInterceptor(loggingInterceptor.Unary()),
-		grpc.ChainStreamInterceptor(loggingInterceptor.Stream()),
-
 		// grpc.MaxRecvMsgSize(s.Config.Options.MaxMsgSize),
 	}
 
@@ -122,11 +139,24 @@ func NewAPIServer(
 		}
 	})
 
+	if err := s.startHTTP(ctx, log, httpRegistrationFunc); err != nil {
+		return nil, err
+	}
+
 	return s, nil
+}
+
+func (s *ApiServer) DialGRPC(ctx context.Context) (*grpc.ClientConn, error) {
+	dialAddr := fmt.Sprintf("passthrough://localhost/%s", s.grpcListener.Addr().String())
+	return grpc.NewClient(dialAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 }
 
 func (s *ApiServer) Addr() net.Addr {
 	return s.grpcListener.Addr()
+}
+
+func (s *ApiServer) HttpAddr() net.Addr {
+	return s.httpListener.Addr()
 }
 
 func (s *ApiServer) gracefulShutdown(timeout time.Duration) {
@@ -160,6 +190,14 @@ func (s *ApiServer) Close(timeout time.Duration) {
 			s.log.Error("Error while closing grpc listener", zap.Error(err))
 		}
 		s.grpcListener = nil
+	}
+
+	if s.httpListener != nil {
+		err := s.httpListener.Close()
+		if err != nil {
+			s.log.Error("Error while closing http listener", zap.Error(err))
+		}
+		s.httpListener = nil
 	}
 
 	s.wg.Wait()

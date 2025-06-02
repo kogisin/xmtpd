@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"os"
 
+	"github.com/pkg/errors"
+
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/xmtp/xmtpd/pkg/blockchain"
 	"github.com/xmtp/xmtpd/pkg/utils"
@@ -12,41 +14,37 @@ import (
 )
 
 type SerializableNode struct {
-	NodeID               uint32 `json:"node_id"`
-	OwnerAddress         string `json:"owner_address"`
-	SigningKeyPub        string `json:"signing_key_pub"`
-	HttpAddress          string `json:"http_address"`
-	MinMonthlyFee        int64  `json:"min_monthly_fee"`
-	IsReplicationEnabled bool   `json:"is_replication_enabled"`
-	IsApiEnabled         bool   `json:"is_api_enabled"`
+	NodeID             uint32 `json:"node_id"`
+	OwnerAddress       string `json:"owner_address"`
+	SigningKeyPub      string `json:"signing_key_pub"`
+	HttpAddress        string `json:"http_address"`
+	InCanonicalNetwork bool   `json:"in_canonical_network"`
 }
 
 func ReadFromRegistry(chainCaller blockchain.INodeRegistryCaller) ([]SerializableNode, error) {
 	nodes, err := chainCaller.GetAllNodes(context.Background())
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "could not retrieve nodes from registry")
 	}
 
 	serializableNodes := make([]SerializableNode, len(nodes))
 	for i, node := range nodes {
-		owner, err := chainCaller.OwnerOf(context.Background(), node.NodeId.Int64())
+		owner, err := chainCaller.OwnerOf(context.Background(), node.NodeId)
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrapf(err, "could not retrieve owner for node %d", node.NodeId)
 		}
 
-		pubKey, err := crypto.UnmarshalPubkey(node.Node.SigningKeyPub)
+		pubKey, err := crypto.UnmarshalPubkey(node.Node.SigningPublicKey)
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrap(err, "could not unmarshal node signing public key")
 		}
 
 		serializableNodes[i] = SerializableNode{
-			NodeID:               uint32(node.NodeId.Int64()),
-			OwnerAddress:         owner.Hex(),
-			SigningKeyPub:        utils.EcdsaPublicKeyToString(pubKey),
-			HttpAddress:          node.Node.HttpAddress,
-			MinMonthlyFee:        node.Node.MinMonthlyFee.Int64(),
-			IsReplicationEnabled: node.Node.IsReplicationEnabled,
-			IsApiEnabled:         node.Node.IsApiEnabled,
+			NodeID:             node.NodeId,
+			OwnerAddress:       owner.Hex(),
+			SigningKeyPub:      utils.EcdsaPublicKeyToString(pubKey),
+			HttpAddress:        node.Node.HttpAddress,
+			InCanonicalNetwork: node.Node.IsCanonical,
 		}
 	}
 
@@ -71,7 +69,6 @@ func WriteToRegistry(
 			node.OwnerAddress,
 			signingKey,
 			node.HttpAddress,
-			node.MinMonthlyFee,
 		)
 		if err != nil {
 			return err
@@ -86,7 +83,9 @@ func DumpNodesToFile(nodes []SerializableNode, outFile string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	return json.NewEncoder(file).Encode(nodes)
 }
@@ -96,7 +95,9 @@ func ImportNodesFromFile(filePath string) ([]SerializableNode, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	var nodes []SerializableNode
 	err = json.NewDecoder(file).Decode(&nodes)

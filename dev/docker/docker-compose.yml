@@ -1,13 +1,17 @@
+x-postgres-image: &x-postgres-image postgres:16
+
 services:
   db:
-    image: postgres:16
+    image: *x-postgres-image
+    profiles: ["single", "dual"]
     environment:
       POSTGRES_PASSWORD: xmtp
     ports:
       - 8765:5432
 
   db2:
-    image: postgres:16
+    image: *x-postgres-image
+    profiles: ["dual"]
     environment:
       POSTGRES_PASSWORD: xmtp
     ports:
@@ -15,21 +19,33 @@ services:
 
   chain:
     platform: linux/amd64
-    image: ghcr.io/foundry-rs/foundry
-    entrypoint: ["anvil", "--host", "0.0.0.0"]
-    working_dir: /anvil
+    image: ghcr.io/xmtp/contracts:v0.4.0
     ports:
       - 7545:8545
-
-  prometheus:
-    image: prom/prometheus
-    ports:
-      - 9090:9090
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
 
   validation:
     image: ghcr.io/xmtp/mls-validation-service:main
     platform: linux/amd64
     ports:
       - 60051:50051
+
+  prometheus:
+    image: ubuntu/prometheus
+    ports:
+      - 9090:9090
+    volumes:
+      - ${HOST_DOCKER_DEV_FOLDER:-.}/prometheus.yml:/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_NAME=Viewer
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+
+volumes:
+  grafana_data:

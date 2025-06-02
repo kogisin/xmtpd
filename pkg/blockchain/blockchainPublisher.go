@@ -4,19 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/ethereum/go-ethereum/core"
-	"github.com/xmtp/xmtpd/pkg/tracing"
 	"math/big"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/core"
+	"github.com/xmtp/xmtpd/pkg/tracing"
+	"github.com/xmtp/xmtpd/pkg/utils"
+
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/xmtp/xmtpd/contracts/pkg/groupmessages"
-	"github.com/xmtp/xmtpd/contracts/pkg/identityupdates"
+	gm "github.com/xmtp/xmtpd/pkg/abi/groupmessagebroadcaster"
+	iu "github.com/xmtp/xmtpd/pkg/abi/identityupdatebroadcaster"
 	"github.com/xmtp/xmtpd/pkg/config"
 	"go.uber.org/zap"
 )
@@ -27,8 +29,8 @@ Can publish to the blockchain, signing messages using the provided signer
 type BlockchainPublisher struct {
 	signer                 TransactionSigner
 	client                 *ethclient.Client
-	messagesContract       *groupmessages.GroupMessages
-	identityUpdateContract *identityupdates.IdentityUpdates
+	messagesContract       *gm.GroupMessageBroadcaster
+	identityUpdateContract *iu.IdentityUpdateBroadcaster
 	logger                 *zap.Logger
 	nonceManager           NonceManager
 	replenishCancel        context.CancelFunc
@@ -46,16 +48,15 @@ func NewBlockchainPublisher(
 	if client == nil {
 		return nil, errors.New("client is nil")
 	}
-	messagesContract, err := groupmessages.NewGroupMessages(
-		common.HexToAddress(contractOptions.MessagesContractAddress),
+	messagesContract, err := gm.NewGroupMessageBroadcaster(
+		common.HexToAddress(contractOptions.AppChain.GroupMessageBroadcasterAddress),
 		client,
 	)
-
 	if err != nil {
 		return nil, err
 	}
-	identityUpdateContract, err := identityupdates.NewIdentityUpdates(
-		common.HexToAddress(contractOptions.IdentityUpdatesContractAddress),
+	identityUpdateContract, err := iu.NewIdentityUpdateBroadcaster(
+		common.HexToAddress(contractOptions.AppChain.IdentityUpdateBroadcasterAddress),
 		client,
 	)
 	if err != nil {
@@ -76,10 +77,12 @@ func NewBlockchainPublisher(
 
 	replenishCtx, cancel := context.WithCancel(ctx)
 
+	streamerLogger := logger.Named("GroupBlockchainPublisher").
+		With(zap.String("contractAddress", contractOptions.AppChain.GroupMessageBroadcasterAddress))
+
 	publisher := BlockchainPublisher{
-		signer: signer,
-		logger: logger.Named("GroupBlockchainPublisher").
-			With(zap.String("contractAddress", contractOptions.MessagesContractAddress)),
+		signer:                 signer,
+		logger:                 streamerLogger,
 		messagesContract:       messagesContract,
 		identityUpdateContract: identityUpdateContract,
 		client:                 client,
@@ -118,7 +121,7 @@ func (m *BlockchainPublisher) PublishGroupMessage(
 	ctx context.Context,
 	groupID [32]byte,
 	message []byte,
-) (*groupmessages.GroupMessagesMessageSent, error) {
+) (*gm.GroupMessageBroadcasterMessageSent, error) {
 	if len(message) == 0 {
 		return nil, errors.New("message is empty")
 	}
@@ -135,7 +138,7 @@ func (m *BlockchainPublisher) PublishGroupMessage(
 				Signer:  m.signer.SignerFunc(),
 			}, groupID, message)
 		},
-		func(ctx context.Context, transaction *types.Transaction) (*groupmessages.GroupMessagesMessageSent, error) {
+		func(ctx context.Context, transaction *types.Transaction) (*gm.GroupMessageBroadcasterMessageSent, error) {
 			receipt, err := WaitForTransaction(
 				ctx,
 				m.logger,
@@ -165,7 +168,7 @@ func (m *BlockchainPublisher) PublishIdentityUpdate(
 	ctx context.Context,
 	inboxId [32]byte,
 	identityUpdate []byte,
-) (*identityupdates.IdentityUpdatesIdentityUpdateCreated, error) {
+) (*iu.IdentityUpdateBroadcasterIdentityUpdateCreated, error) {
 	if len(identityUpdate) == 0 {
 		return nil, errors.New("identity update is empty")
 	}
@@ -182,7 +185,7 @@ func (m *BlockchainPublisher) PublishIdentityUpdate(
 				Signer:  m.signer.SignerFunc(),
 			}, inboxId, identityUpdate)
 		},
-		func(ctx context.Context, transaction *types.Transaction) (*identityupdates.IdentityUpdatesIdentityUpdateCreated, error) {
+		func(ctx context.Context, transaction *types.Transaction) (*iu.IdentityUpdateBroadcasterIdentityUpdateCreated, error) {
 			receipt, err := WaitForTransaction(
 				ctx,
 				m.logger,
@@ -256,11 +259,28 @@ func withNonce[T any](ctx context.Context,
 					zap.Uint64("nonce", nonce.Uint64()),
 					zap.Error(err),
 				)
+
 				err = nonceContext.Consume()
 				if err != nil {
 					nonceContext.Cancel()
 					return nil, err
 				}
+				continue
+			}
+
+			if strings.Contains(
+				err.Error(),
+				"nonce too high",
+			) {
+				// we have been hammering the blockchain too hard
+				// back off for a little bit
+				logger.Debug(
+					"Nonce too high, backing off...",
+					zap.Uint64("nonce", nonce.Uint64()),
+					zap.Error(err),
+				)
+				utils.RandomSleep(ctx, 500*time.Millisecond)
+				nonceContext.Cancel()
 				continue
 			}
 

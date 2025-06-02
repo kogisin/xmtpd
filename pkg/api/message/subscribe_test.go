@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/xmtp/xmtpd/pkg/api/message"
 	"github.com/xmtp/xmtpd/pkg/db"
-	dbUtils "github.com/xmtp/xmtpd/pkg/db"
 	"github.com/xmtp/xmtpd/pkg/db/queries"
 	"github.com/xmtp/xmtpd/pkg/proto/xmtpv4/envelopes"
 	"github.com/xmtp/xmtpd/pkg/proto/xmtpv4/message_api"
@@ -28,10 +27,10 @@ var allRows []queries.InsertGatewayEnvelopeParams
 
 func setupTest(
 	t *testing.T,
-) (message_api.ReplicationApiClient, *sql.DB, testUtilsApi.ApiServerMocks, func()) {
-	api, db, mocks, cleanup := testUtilsApi.NewTestReplicationAPIClient(t)
+) (message_api.ReplicationApiClient, *sql.DB, testUtilsApi.ApiServerMocks) {
+	api, dbHandle, mocks := testUtilsApi.NewTestReplicationAPIClient(t)
 
-	payerId := dbUtils.NullInt32(testutils.CreatePayer(t, db))
+	payerId := db.NullInt32(testutils.CreatePayer(t, dbHandle))
 	allRows = []queries.InsertGatewayEnvelopeParams{
 		// Initial rows
 		{
@@ -87,7 +86,7 @@ func setupTest(
 		},
 	}
 
-	return api, db, mocks, cleanup
+	return api, dbHandle, mocks
 }
 
 func insertInitialRows(t *testing.T, store *sql.DB) {
@@ -126,12 +125,10 @@ func validateUpdates(
 }
 
 func TestSubscribeEnvelopesAll(t *testing.T) {
-	client, db, _, cleanup := setupTest(t)
-	defer cleanup()
+	client, db, _ := setupTest(t)
 	insertInitialRows(t, db)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	stream, err := client.SubscribeEnvelopes(
 		ctx,
 		&message_api.SubscribeEnvelopesRequest{
@@ -147,12 +144,10 @@ func TestSubscribeEnvelopesAll(t *testing.T) {
 }
 
 func TestSubscribeEnvelopesByTopic(t *testing.T) {
-	client, store, _, cleanup := setupTest(t)
-	defer cleanup()
+	client, store, _ := setupTest(t)
 	insertInitialRows(t, store)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	stream, err := client.SubscribeEnvelopes(
 		ctx,
 		&message_api.SubscribeEnvelopesRequest{
@@ -169,12 +164,10 @@ func TestSubscribeEnvelopesByTopic(t *testing.T) {
 }
 
 func TestSubscribeEnvelopesByOriginator(t *testing.T) {
-	client, db, _, cleanup := setupTest(t)
-	defer cleanup()
+	client, db, _ := setupTest(t)
 	insertInitialRows(t, db)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	stream, err := client.SubscribeEnvelopes(
 		ctx,
 		&message_api.SubscribeEnvelopesRequest{
@@ -191,12 +184,10 @@ func TestSubscribeEnvelopesByOriginator(t *testing.T) {
 }
 
 func TestSimultaneousSubscriptions(t *testing.T) {
-	client, store, _, cleanup := setupTest(t)
-	defer cleanup()
+	client, store, _ := setupTest(t)
 	insertInitialRows(t, store)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	stream1, err := client.SubscribeEnvelopes(
 		ctx,
 		&message_api.SubscribeEnvelopesRequest{
@@ -234,12 +225,10 @@ func TestSimultaneousSubscriptions(t *testing.T) {
 }
 
 func TestSubscribeEnvelopesFromCursor(t *testing.T) {
-	client, store, _, cleanup := setupTest(t)
-	defer cleanup()
+	client, store, _ := setupTest(t)
 	insertInitialRows(t, store)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	stream, err := client.SubscribeEnvelopes(
 		ctx,
 		&message_api.SubscribeEnvelopesRequest{
@@ -256,12 +245,10 @@ func TestSubscribeEnvelopesFromCursor(t *testing.T) {
 }
 
 func TestSubscribeEnvelopesFromEmptyCursor(t *testing.T) {
-	client, store, _, cleanup := setupTest(t)
-	defer cleanup()
+	client, store, _ := setupTest(t)
 	insertInitialRows(t, store)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	stream, err := client.SubscribeEnvelopes(
 		ctx,
 		&message_api.SubscribeEnvelopesRequest{
@@ -278,8 +265,7 @@ func TestSubscribeEnvelopesFromEmptyCursor(t *testing.T) {
 }
 
 func TestSubscribeEnvelopesInvalidRequest(t *testing.T) {
-	client, _, _, cleanup := setupTest(t)
-	defer cleanup()
+	client, _, _ := setupTest(t)
 
 	stream, err := client.SubscribeEnvelopes(
 		context.Background(),

@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
 set -e
 
-. dev/docker/env
+if [ -z "$1" ]; then
+  profile="single"
+  echo "No profile provided, defaulting to single"
+elif [ "$1" = "single" ] || [ "$1" = "dual" ]; then
+  profile="$1"
+else
+  echo "Invalid profile '$1', defaulting to single"
+  profile="single"
+fi
 
-docker_compose down --remove-orphans --volumes
+docker compose \
+  -f dev/docker/docker-compose.yml \
+  --env-file dev/local.env \
+  --profile ${profile} \
+  -p "xmtpd" \
+  down --remove-orphans --volumes
+
+docker compose \
+  -f dev/docker/docker-compose-register.yml \
+  --env-file dev/local.env \
+  --profile ${profile} \
+  -p "xmtpd_register_nodes" \
+  down --remove-orphans --volumes

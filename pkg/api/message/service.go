@@ -3,8 +3,12 @@ package message
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"math"
 	"time"
+
+	"github.com/xmtp/xmtpd/pkg/config"
 
 	"github.com/xmtp/xmtpd/pkg/api/metadata"
 	"github.com/xmtp/xmtpd/pkg/fees"
@@ -45,6 +49,7 @@ type Service struct {
 	validationService mlsvalidate.MLSValidationService
 	cu                metadata.CursorUpdater
 	feeCalculator     fees.IFeeCalculator
+	options           config.ReplicationOptions
 }
 
 func NewReplicationApiService(
@@ -55,7 +60,12 @@ func NewReplicationApiService(
 	validationService mlsvalidate.MLSValidationService,
 	updater metadata.CursorUpdater,
 	rateFetcher fees.IRatesFetcher,
+	options config.ReplicationOptions,
 ) (*Service, error) {
+	if validationService == nil {
+		return nil, errors.New("validation service must not be nil")
+	}
+
 	feeCalculator := fees.NewFeeCalculator(rateFetcher)
 	publishWorker, err := startPublishWorker(ctx, log, registrant, store, feeCalculator)
 	if err != nil {
@@ -76,6 +86,7 @@ func NewReplicationApiService(
 		validationService: validationService,
 		cu:                updater,
 		feeCalculator:     feeCalculator,
+		options:           options,
 	}, nil
 }
 
@@ -108,9 +119,21 @@ func (s *Service) SubscribeEnvelopes(
 		return err
 	}
 
+	// GRPC keep-alives are not sufficient in some load balanced environments
+	// we need to send an actual payload
+	// see https://github.com/xmtp/xmtpd/issues/669
+	ticker := time.NewTicker(s.options.SendKeepAliveInterval)
+	defer ticker.Stop()
+
 	for {
 		select {
+		case <-ticker.C:
+			err = stream.Send(&message_api.SubscribeEnvelopesResponse{})
+			if err != nil {
+				return status.Errorf(codes.Internal, "could not send keepalive: %v", err)
+			}
 		case envs, open := <-ch:
+			ticker.Reset(s.options.SendKeepAliveInterval)
 			if open {
 				err := s.sendEnvelopes(stream, query, envs)
 				if err != nil {
@@ -355,12 +378,20 @@ func (s *Service) PublishPayerEnvelopes(
 	}
 	s.publishWorker.notifyStagedPublish()
 
-	baseFee, congestionFee, err := s.publishWorker.calculateFees(&stagedEnv)
+	baseFee, congestionFee, err := s.publishWorker.calculateFees(
+		&stagedEnv,
+		payerEnv.Proto().GetMessageRetentionDays(),
+	)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "could not calculate fees: %v", err)
 	}
 
-	originatorEnv, err := s.registrant.SignStagedEnvelope(stagedEnv, baseFee, congestionFee)
+	originatorEnv, err := s.registrant.SignStagedEnvelope(
+		stagedEnv,
+		baseFee,
+		congestionFee,
+		payerEnv.Proto().GetMessageRetentionDays(),
+	)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "could not sign envelope: %v", err)
 	}
@@ -380,7 +411,7 @@ func (s *Service) GetInboxIds(
 	queries := queries.New(s.store)
 	addresses := []string{}
 	for _, request := range req.Requests {
-		addresses = append(addresses, request.GetAddress())
+		addresses = append(addresses, request.GetIdentifier())
 	}
 
 	addressLogEntries, err := queries.GetAddressLogs(ctx, addresses)
@@ -392,7 +423,7 @@ func (s *Service) GetInboxIds(
 
 	for index, address := range addresses {
 		resp := message_api.GetInboxIdsResponse_Response{}
-		resp.Address = address
+		resp.Identifier = address
 
 		for _, logEntry := range addressLogEntries {
 			if logEntry.Address == address {
@@ -410,12 +441,61 @@ func (s *Service) GetInboxIds(
 	}, nil
 }
 
+func (s *Service) GetNewestEnvelope(
+	ctx context.Context,
+	req *message_api.GetNewestEnvelopeRequest,
+) (*message_api.GetNewestEnvelopeResponse, error) {
+	logger := s.log.With(zap.String("method", "GetNewestEnvelope"))
+	queries := queries.New(s.store)
+	topics := req.GetTopics()
+	originalSort := make(map[string]int)
+
+	for idx, topic := range topics {
+		originalSort[string(topic)] = idx
+	}
+
+	rows, err := queries.SelectNewestFromTopics(ctx, topics)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "could not select envelopes: %v", err)
+	}
+
+	logger.Info(
+		"received newest envelopes for topics",
+		zap.Int("numEnvelopes", len(rows)),
+		zap.Int("numTopics", len(topics)),
+	)
+
+	results := make([]*message_api.GetNewestEnvelopeResponse_Response, len(topics))
+	for _, row := range rows {
+		idx, ok := originalSort[string(row.Topic)]
+		if !ok {
+			// We will leave the index empty if there are no envelopes for that topic
+			continue
+		}
+		originatorEnv := &envelopesProto.OriginatorEnvelope{}
+		err := proto.Unmarshal(row.OriginatorEnvelope, originatorEnv)
+		if err != nil {
+			// We expect to have already validated the envelope when it was inserted
+			logger.Error("could not unmarshal originator envelope", zap.Error(err))
+			continue
+		}
+
+		results[idx] = &message_api.GetNewestEnvelopeResponse_Response{
+			OriginatorEnvelope: originatorEnv,
+		}
+	}
+
+	return &message_api.GetNewestEnvelopeResponse{
+		Results: results,
+	}, nil
+}
+
 func (s *Service) validatePayerEnvelope(
 	rawEnv *envelopesProto.PayerEnvelope,
 ) (*envelopes.PayerEnvelope, error) {
 	payerEnv, err := envelopes.NewPayerEnvelope(rawEnv)
 	if err != nil {
-		return nil, err
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 
 	if payerEnv.TargetOriginator != s.registrant.NodeID() {
@@ -423,14 +503,33 @@ func (s *Service) validatePayerEnvelope(
 	}
 
 	if _, err = payerEnv.RecoverSigner(); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
+
+	if err = s.validateClientInfo(&payerEnv.ClientEnvelope); err != nil {
 		return nil, err
 	}
 
-	if err := s.validateClientInfo(&payerEnv.ClientEnvelope); err != nil {
+	err = s.validateExpiry(payerEnv)
+	if err != nil {
 		return nil, err
 	}
 
 	return payerEnv, nil
+}
+
+func (s *Service) validateExpiry(payerEnv *envelopes.PayerEnvelope) error {
+	// the payload should be valid for at least for 2 days
+	if payerEnv.RetentionDays() < 2 {
+		return status.Errorf(codes.InvalidArgument, "invalid expiry retention days. Must be >= 2")
+	}
+
+	// more than a ~year sounds like a mistake
+	if payerEnv.RetentionDays() != math.MaxUint32 && payerEnv.RetentionDays() > 365 {
+		return status.Errorf(codes.InvalidArgument, "invalid expiry retention days. Must be <= 365")
+	}
+
+	return nil
 }
 
 func (s *Service) validateKeyPackage(
@@ -473,12 +572,12 @@ func (s *Service) validateClientInfo(clientEnv *envelopes.ClientEnvelope) error 
 		for nodeId, seqId := range aad.GetDependsOn().NodeIdToSequenceId {
 			lastSeqId, exists := lastSeenCursor.NodeIdToSequenceId[nodeId]
 			if !exists {
-				return fmt.Errorf(
+				return status.Errorf(codes.InvalidArgument,
 					"node ID %d specified in DependsOn has not been seen by this node",
 					nodeId,
 				)
 			} else if seqId > lastSeqId {
-				return fmt.Errorf(
+				return status.Errorf(codes.InvalidArgument,
 					"sequence ID %d for node ID %d specified in DependsOn exceeds last seen sequence ID %d",
 					seqId,
 					nodeId,

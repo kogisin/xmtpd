@@ -4,23 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"io"
 	"sync"
 	"time"
 
-	"github.com/xmtp/xmtpd/pkg/constants"
-	"github.com/xmtp/xmtpd/pkg/currency"
+	"github.com/cenkalti/backoff/v5"
 	"github.com/xmtp/xmtpd/pkg/db"
 	"github.com/xmtp/xmtpd/pkg/db/queries"
 	envUtils "github.com/xmtp/xmtpd/pkg/envelopes"
 	"github.com/xmtp/xmtpd/pkg/fees"
 	clientInterceptors "github.com/xmtp/xmtpd/pkg/interceptors/client"
+	"github.com/xmtp/xmtpd/pkg/metrics"
 	"github.com/xmtp/xmtpd/pkg/proto/xmtpv4/envelopes"
 	"github.com/xmtp/xmtpd/pkg/proto/xmtpv4/message_api"
 	"github.com/xmtp/xmtpd/pkg/registrant"
 	"github.com/xmtp/xmtpd/pkg/registry"
 	"github.com/xmtp/xmtpd/pkg/tracing"
-	"github.com/xmtp/xmtpd/pkg/utils"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
@@ -38,20 +36,6 @@ type syncWorker struct {
 	feeCalculator      fees.IFeeCalculator
 }
 
-type originatorStream struct {
-	nodeID       uint32
-	lastEnvelope *envUtils.OriginatorEnvelope
-	stream       message_api.ReplicationApi_SubscribeEnvelopesClient
-}
-
-type ExitLoopError struct {
-	Message string
-}
-
-func (e *ExitLoopError) Error() string {
-	return e.Message
-}
-
 func startSyncWorker(
 	ctx context.Context,
 	log *zap.Logger,
@@ -60,7 +44,6 @@ func startSyncWorker(
 	store *sql.DB,
 	feeCalculator fees.IFeeCalculator,
 ) (*syncWorker, error) {
-
 	ctx, cancel := context.WithCancel(ctx)
 
 	s := &syncWorker{
@@ -127,7 +110,6 @@ func (s *syncWorker) subscribeToRegistry() {
 					}
 				}
 			}
-
 		})
 }
 
@@ -166,6 +148,8 @@ func (s *syncWorker) subscribeToNode(nodeid uint32) {
 func (s *syncWorker) subscribeToNodeRegistration(
 	registration NodeRegistration,
 ) {
+	connectionsStatusCounter := metrics.NewSyncConnectionsStatusCounter(registration.nodeid)
+	defer connectionsStatusCounter.Close()
 
 	node, err := s.nodeRegistry.GetNode(registration.nodeid)
 	if err != nil {
@@ -175,58 +159,71 @@ func (s *syncWorker) subscribeToNodeRegistration(
 			zap.Uint32("nodeid", registration.nodeid),
 			zap.Error(err),
 		)
+		connectionsStatusCounter.MarkFailure()
 		s.handleUnhealthyNode(registration)
 		return
 	}
 
 	if !node.IsValidConfig {
+		connectionsStatusCounter.MarkFailure()
 		s.handleUnhealthyNode(registration)
 		return
 	}
 
-	err = nil
+	expBackoff := backoff.NewExponentialBackOff()
+	expBackoff.InitialInterval = 1 * time.Second
 
-	// TODO(mkysel) we should eventually implement a better backoff strategy
-	var backoff = time.Second
-	for {
-		select {
-		case <-registration.ctx.Done():
-			// either registry has changed or we are shutting down
-			s.log.Debug(
-				"Context is done. Closing stream and connection",
-				zap.String("address", node.HttpAddress),
-			)
-			return
-		default:
+	operation := func() (string, error) {
+		// Ensure cleanup of resources, defer works here since we are using a named function
+		var conn *grpc.ClientConn
+		var stream *originatorStream
+		defer func() {
+			if stream != nil {
+				_ = stream.stream.CloseSend()
+			}
+			if conn != nil {
+				_ = conn.Close()
+			}
+		}()
+
+		var err error
+		defer func() {
 			if err != nil {
 				s.log.Error(
 					"Error connecting to node. Retrying...",
 					zap.String("address", node.HttpAddress),
 					zap.Error(err),
 				)
-				time.Sleep(backoff)
-				backoff = min(backoff*2, 30*time.Second)
-			} else {
-				backoff = time.Second
+				connectionsStatusCounter.MarkFailure()
 			}
+		}()
 
-			var conn *grpc.ClientConn
-			conn, err = s.connectToNode(*node)
-			if err != nil {
-				continue
-			}
-
-			var stream *originatorStream
-			stream, err = s.setupStream(registration.ctx, *node, conn)
-			if err != nil {
-				_ = conn.Close()
-				continue
-			}
-			err = s.listenToStream(registration.ctx, *node, stream)
-			_ = stream.stream.CloseSend()
-			_ = conn.Close()
+		if registration.ctx.Err() != nil {
+			return "", backoff.Permanent(registration.ctx.Err())
 		}
+
+		conn, err = s.connectToNode(*node)
+		if err != nil {
+			return "", err
+		}
+
+		stream, err = s.setupStream(registration.ctx, *node, conn)
+		if err != nil {
+			return "", err
+		}
+
+		connectionsStatusCounter.MarkSuccess()
+
+		err = stream.listen()
+		return "", err
 	}
+
+	_, _ = backoff.Retry(
+		registration.ctx,
+		operation,
+		backoff.WithBackOff(expBackoff),
+		backoff.WithMaxElapsedTime(0),
+	)
 }
 
 func (s *syncWorker) handleUnhealthyNode(registration NodeRegistration) {
@@ -335,205 +332,24 @@ func (s *syncWorker) setupStream(
 			err,
 		)
 	}
-	originatorStream := &originatorStream{nodeID: nodeID, stream: stream}
+
+	var lastEnvelope *envUtils.OriginatorEnvelope
 	for _, row := range result {
 		if uint32(row.OriginatorNodeID) == nodeID {
-			lastEnvelope, err := envUtils.NewOriginatorEnvelopeFromBytes(row.OriginatorEnvelope)
+			lastEnvelope, err = envUtils.NewOriginatorEnvelopeFromBytes(row.OriginatorEnvelope)
 			if err != nil {
 				return nil, err
 			}
-			originatorStream.lastEnvelope = lastEnvelope
 		}
 	}
-	return originatorStream, nil
-}
 
-func (s *syncWorker) listenToStream(
-	_ context.Context,
-	node registry.Node,
-	originatorStream *originatorStream,
-) error {
-	recvChan := make(chan *message_api.SubscribeEnvelopesResponse)
-	errChan := make(chan error)
-
-	go func() {
-		for {
-			envs, err := originatorStream.stream.Recv()
-			if err != nil {
-				errChan <- err
-				return
-			}
-			recvChan <- envs
-		}
-	}()
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			s.log.Info("Context canceled, stopping stream listener")
-			return nil
-
-		case envs := <-recvChan:
-			s.log.Debug(
-				"Received envelopes",
-				zap.String("peer", node.HttpAddress),
-				zap.Any("numEnvelopes", len(envs.Envelopes)),
-			)
-			for _, env := range envs.Envelopes {
-				s.validateAndInsertEnvelope(originatorStream, env)
-			}
-
-		case err := <-errChan:
-			if err == io.EOF {
-				s.log.Info("Stream closed with EOF")
-				// let the caller rebuild the stream if required
-				return nil
-			}
-			s.log.Error(
-				"Stream closed with error",
-				zap.String("peer", node.HttpAddress),
-				zap.Error(err),
-			)
-			return err
-		}
-	}
-}
-
-func (s *syncWorker) validateAndInsertEnvelope(
-	stream *originatorStream,
-	envProto *envelopes.OriginatorEnvelope,
-) {
-	env, err := envUtils.NewOriginatorEnvelope(envProto)
-	if err != nil {
-		s.log.Error("Failed to unmarshal originator envelope", zap.Error(err))
-		return
-	}
-
-	// TODO:(nm) Handle fetching envelopes from other nodes
-	if env.OriginatorNodeID() != stream.nodeID {
-		s.log.Error("Received envelope from wrong node", zap.Any("nodeID", env.OriginatorNodeID()))
-		return
-	}
-
-	var lastSequenceID uint64 = 0
-	var lastNs int64 = 0
-	if stream.lastEnvelope != nil {
-		lastSequenceID = stream.lastEnvelope.OriginatorSequenceID()
-		lastNs = stream.lastEnvelope.OriginatorNs()
-	}
-	if env.OriginatorSequenceID() != lastSequenceID+1 || env.OriginatorNs() < lastNs {
-		// TODO(rich) Submit misbehavior report and continue
-		s.log.Error("Received out of order envelope")
-	}
-
-	if env.OriginatorSequenceID() > lastSequenceID {
-		stream.lastEnvelope = env
-	}
-
-	// Calculate the fees independently to verify the originator's calculation
-	ourFeeCalculation, err := s.calculateFees(env)
-	if err != nil {
-		s.log.Error("Failed to calculate fees", zap.Error(err))
-		return
-	}
-	originatorsFeeCalculation := currency.PicoDollar(
-		env.UnsignedOriginatorEnvelope.BaseFee(),
-	) + currency.PicoDollar(
-		env.UnsignedOriginatorEnvelope.CongestionFee(),
-	)
-	if ourFeeCalculation != originatorsFeeCalculation {
-		s.log.Error(
-			"Fee calculation mismatch",
-			zap.Any("ourFee", ourFeeCalculation),
-			zap.Any("originatorsFee", originatorsFeeCalculation),
-		)
-	}
-
-	// TODO Validation logic - share code with API service and publish worker
-	// Signatures, topic type, etc
-	s.insertEnvelope(env, ourFeeCalculation)
-}
-
-func (s *syncWorker) insertEnvelope(
-	env *envUtils.OriginatorEnvelope,
-	spendPicodollars currency.PicoDollar,
-) {
-	s.log.Debug("Replication server received envelope", zap.Any("envelope", env))
-	originatorBytes, err := env.Bytes()
-	if err != nil {
-		s.log.Error("Failed to marshal originator envelope", zap.Error(err))
-		return
-	}
-
-	payerId, err := s.getPayerID(env)
-	if err != nil {
-		s.log.Error("Failed to get payer ID", zap.Error(err))
-		return
-	}
-
-	originatorID := int32(env.OriginatorNodeID())
-	originatorTime := utils.NsToDate(env.OriginatorNs())
-
-	inserted, err := db.InsertGatewayEnvelopeAndIncrementUnsettledUsage(
+	return newOriginatorStream(
 		s.ctx,
 		s.store,
-		queries.InsertGatewayEnvelopeParams{
-			OriginatorNodeID:     int32(env.OriginatorNodeID()),
-			OriginatorSequenceID: int64(env.OriginatorSequenceID()),
-			Topic:                env.TargetTopic().Bytes(),
-			OriginatorEnvelope:   originatorBytes,
-			PayerID:              db.NullInt32(payerId),
-		},
-		queries.IncrementUnsettledUsageParams{
-			PayerID:           payerId,
-			OriginatorID:      originatorID,
-			MinutesSinceEpoch: utils.MinutesSinceEpoch(originatorTime),
-			SpendPicodollars:  int64(spendPicodollars),
-		},
-	)
-	if err != nil {
-		s.log.Error("Failed to insert gateway envelope", zap.Error(err))
-		return
-	} else if inserted == 0 {
-		// Envelope was already inserted by another worker
-		s.log.Warn("Envelope already inserted")
-		return
-	}
-}
-
-func (s *syncWorker) calculateFees(env *envUtils.OriginatorEnvelope) (currency.PicoDollar, error) {
-	payerEnvelopeLength := len(env.UnsignedOriginatorEnvelope.PayerEnvelopeBytes())
-	messageTime := utils.NsToDate(env.OriginatorNs())
-
-	baseFee, err := s.feeCalculator.CalculateBaseFee(
-		messageTime,
-		int64(payerEnvelopeLength),
-		constants.DEFAULT_STORAGE_DURATION_DAYS,
-	)
-	if err != nil {
-		return 0, err
-	}
-
-	// TODO:(nm) Calculate real rate of congestion
-	congestionFee, err := s.feeCalculator.CalculateCongestionFee(messageTime, 0)
-	if err != nil {
-		return 0, err
-	}
-
-	return baseFee + congestionFee, nil
-}
-
-func (s *syncWorker) getPayerID(env *envUtils.OriginatorEnvelope) (int32, error) {
-	payerAddress, err := env.UnsignedOriginatorEnvelope.PayerEnvelope.RecoverSigner()
-	if err != nil {
-		return 0, err
-	}
-
-	q := queries.New(s.store)
-	payerId, err := q.FindOrCreatePayer(s.ctx, payerAddress.Hex())
-	if err != nil {
-		return 0, err
-	}
-
-	return payerId, nil
+		s.log,
+		&node,
+		lastEnvelope,
+		stream,
+		s.feeCalculator,
+	), nil
 }

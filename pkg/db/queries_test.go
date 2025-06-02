@@ -2,8 +2,9 @@ package db_test
 
 import (
 	"context"
-	xmtpd_db "github.com/xmtp/xmtpd/pkg/db"
 	"testing"
+
+	xmtpd_db "github.com/xmtp/xmtpd/pkg/db"
 
 	"github.com/stretchr/testify/require"
 	"github.com/xmtp/xmtpd/pkg/db/queries"
@@ -31,8 +32,7 @@ func getAddressLogState(
 
 func TestInsertAddressLog(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 	address := testutils.RandomString(20)
@@ -86,8 +86,7 @@ func TestInsertAddressLog(t *testing.T) {
 
 func TestRevokeAddressLog(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 
@@ -138,8 +137,7 @@ func TestRevokeAddressLog(t *testing.T) {
 
 func TestFindOrCreatePayer(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 

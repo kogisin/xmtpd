@@ -1,10 +1,22 @@
 {
-  "go.lintTool": "golangci-lint",
-  "go.lintFlags": ["--fast"],
-  "pgFormatter.typeCase": "uppercase",
-  "pgFormatter.tabs": true,
+  "go.lintTool": "golangci-lint-v2",
+  "go.lintFlags": ["--path-mode=abs", "--fast-only"],
+  "go.formatTool": "custom",
+  "go.alternateTools": {
+    "customFormatter": "golangci-lint-v2"
+  },
+  "go.formatFlags": ["fmt", "--stdin"],
   "[sql]": {
-    "editor.defaultFormatter": "bradymholt.pgformatter"
+    "editor.defaultFormatter": "mtxr.sqltools",
+    "editor.formatOnSave": true
+  },
+  "go.useLanguageServer": true,
+  "sqltools.highlightQuery": false,
+  "sqltools.format": {
+    "linesBetweenQueries": 2,
+    "language": "sql",
+    "reservedWordCase": "upper",
+    "typeCase": "upper"
   },
   // Instructions from https://github.com/segmentio/golines
   "emeraldwalk.runonsave": {

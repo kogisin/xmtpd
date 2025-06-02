@@ -1,20 +1,48 @@
 package blockchain_test
 
 import (
+	"container/heap"
 	"context"
+	"math/big"
+	"sync"
+	"testing"
+
 	"github.com/stretchr/testify/require"
 	"github.com/xmtp/xmtpd/pkg/blockchain"
 	"github.com/xmtp/xmtpd/pkg/testutils"
 	"go.uber.org/zap"
-	"math/big"
-	"sync"
-	"testing"
 )
 
+type Int64Heap []int64
+
+func (h *Int64Heap) Len() int           { return len(*h) }
+func (h *Int64Heap) Less(i, j int) bool { return (*h)[i] < (*h)[j] }
+func (h *Int64Heap) Swap(i, j int)      { (*h)[i], (*h)[j] = (*h)[j], (*h)[i] }
+
+func (h *Int64Heap) Push(x interface{}) {
+	*h = append(*h, x.(int64))
+}
+
+func (h *Int64Heap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[0] // Get the smallest element
+	*h = old[1:n]
+	return x
+}
+
+func (h *Int64Heap) Peek() int64 {
+	if len(*h) == 0 {
+		return -1 // Return an invalid value if empty
+	}
+	return (*h)[0]
+}
+
 type TestNonceManager struct {
-	mu     sync.Mutex
-	nonce  int64
-	logger *zap.Logger
+	mu        sync.Mutex
+	nonce     int64
+	logger    *zap.Logger
+	abandoned Int64Heap
 }
 
 func NewTestNonceManager(logger *zap.Logger) *TestNonceManager {
@@ -22,17 +50,30 @@ func NewTestNonceManager(logger *zap.Logger) *TestNonceManager {
 }
 
 func (tm *TestNonceManager) GetNonce(ctx context.Context) (*blockchain.NonceContext, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
-	nonce := tm.nonce
-	tm.nonce++
+	var nonce int64
+	if tm.abandoned.Len() > 0 {
+		nonce = heap.Pop(&tm.abandoned).(int64)
+	} else {
+		nonce = tm.nonce
+		tm.nonce++
+	}
 
 	tm.logger.Debug("Generated Nonce", zap.Int64("nonce", nonce))
 
 	return &blockchain.NonceContext{
-		Nonce:  *new(big.Int).SetInt64(nonce),
-		Cancel: func() {}, // No-op
+		Nonce: *new(big.Int).SetInt64(nonce),
+		Cancel: func() {
+			tm.mu.Lock()
+			defer tm.mu.Unlock()
+			tm.abandoned.Push(nonce)
+		}, // No-op
 		Consume: func() error {
 			return nil // No-op
 		},
@@ -52,10 +93,8 @@ func (tm *TestNonceManager) Replenish(ctx context.Context, nonce big.Int) error 
 }
 
 func TestGetNonce_Simple(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	ctx := t.Context()
+	db, _ := testutils.NewDB(t, ctx)
 
 	logger, err := zap.NewDevelopment()
 	require.NoError(t, err)
@@ -72,10 +111,8 @@ func TestGetNonce_Simple(t *testing.T) {
 }
 
 func TestGetNonce_RevertMany(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	ctx := t.Context()
+	db, _ := testutils.NewDB(t, ctx)
 
 	logger, err := zap.NewDevelopment()
 	require.NoError(t, err)
@@ -93,10 +130,8 @@ func TestGetNonce_RevertMany(t *testing.T) {
 }
 
 func TestGetNonce_ConsumeMany(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	ctx := t.Context()
+	db, _ := testutils.NewDB(t, ctx)
 
 	logger, err := zap.NewDevelopment()
 	require.NoError(t, err)
@@ -115,10 +150,8 @@ func TestGetNonce_ConsumeMany(t *testing.T) {
 }
 
 func TestGetNonce_ConsumeManyConcurrent(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	ctx := t.Context()
+	db, _ := testutils.NewDB(t, ctx)
 
 	logger, err := zap.NewDevelopment()
 	require.NoError(t, err)
@@ -129,17 +162,28 @@ func TestGetNonce_ConsumeManyConcurrent(t *testing.T) {
 
 	var wg sync.WaitGroup
 	numClients := 20
+	errCh := make(chan error, numClients)
 
 	for i := 0; i < numClients; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			nonce, err := nonceManager.GetNonce(ctx)
-			require.NoError(t, err)
+			if err != nil {
+				errCh <- err
+				return
+			}
 			err = nonce.Consume()
-			require.NoError(t, err)
+			if err != nil {
+				errCh <- err
+				return
+			}
 		}()
 	}
 
 	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		require.NoError(t, err)
+	}
 }

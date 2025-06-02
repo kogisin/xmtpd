@@ -43,8 +43,11 @@ func NewMetricsServer(
 	}
 	registerCollectors(reg)
 	srv := http.Server{
-		Addr:    addr,
-		Handler: promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}),
+		Addr: addr,
+		Handler: promhttp.HandlerFor(reg, promhttp.HandlerOpts{
+			EnableOpenMetrics: true,
+			Registry:          reg,
+		}),
 	}
 
 	tracing.GoPanicWrap(s.ctx, &s.wg, "metrics-server", func(ctx context.Context) {
@@ -66,12 +69,31 @@ func (s *Server) Close() {
 }
 
 func registerCollectors(reg prometheus.Registerer) {
-	//TODO: add metrics here
 	cols := []prometheus.Collector{
-		numLogsFound,
-		currentBlock,
-		getLogsDuration,
-		getLogsRequests,
+		indexerNumLogsFound,
+		indexerCurrentBlock,
+		indexerMaxBlock,
+		indexerCurrentBlockLag,
+		indexerCountRetryableStorageErrors,
+		indexerGetLogsDuration,
+		indexerGetLogsRequests,
+		indexerLogProcessingTime,
+		payerNodePublishDuration,
+		payerCursorBlockTime,
+		payerCurrentNonce,
+		payerBanlistRetry,
+		payerMessagesOriginated,
+		syncOriginatorSequenceId,
+		syncOutgoingSyncConnections,
+		syncFailedOutgoingSyncConnections,
+		syncFailedOutgoingSyncConnectionCounter,
+		apiOpenConnections,
+		apiIncomingNodeConnectionByVersionGauge,
+		apiNodeConnectionRequestsByVersionCounter,
+		apiFailedGRPCRequestsCounter,
+		blockchainWaitForTransaction,
+		blockchainPublishPayload,
+		payerGetReaderNodeAvailableNodes,
 	}
 
 	for _, col := range cols {

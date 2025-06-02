@@ -5,14 +5,7 @@ on:
       - main
       - rel/**
   pull_request:
-    paths:
-      - ".github/workflows/test.yml"
-      - "pkg/**"
-      - "cmd/**"
-      - "dev/**"
-      - "go.mod"
-      - "go.sum"
-      - "tools.go"
+
 jobs:
   test:
     name: Test (Node)
@@ -23,37 +16,34 @@ jobs:
           submodules: recursive
           fetch-tags: true
           fetch-depth: 0
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache-dependency-path: "**/*.sum"
-      - run: dev/docker/up
+
+      - run: dev/docker/up single
+
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: v1.0.0
-      - run: contracts/dev/deploy local
-      - run: dev/register-local-node
+
       - name: Run Tests
         run: |
           export GOPATH="${HOME}/go/"
           export PATH="${PATH}:${GOPATH}/bin"
           go install github.com/jstemmer/go-junit-report/v2@latest
           go test -v ./... | go-junit-report -set-exit-code -iocopy -out report.xml
+
       - name: Run Race Tests
         run: |
           export GOPATH="${HOME}/go/"
           export PATH="${PATH}:${GOPATH}/bin"
           go test -v ./... -race
-      - name: Run Upgrade Tests
-        run: |
-          export GOPATH="${HOME}/go/"
-          export PATH="${PATH}:${GOPATH}/bin"
-          export ENABLE_UPGRADE_TESTS=1
-          go test github.com/xmtp/xmtpd/pkg/upgrade -v
-      - uses: datadog/junit-upload-github-action@v1
+      - uses: datadog/junit-upload-github-action@v2
         with:
-          api-key: ${{ secrets.DD_API_KEY }}
+          api_key: ${{ secrets.DD_API_KEY }}
           service: xmtp-node-go
           files: report.xml
           env: ci

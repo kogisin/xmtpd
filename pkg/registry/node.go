@@ -3,7 +3,6 @@ package registry
 import (
 	"crypto/ecdsa"
 	"fmt"
-	"math/big"
 	"time"
 
 	"github.com/xmtp/xmtpd/pkg/utils"
@@ -14,14 +13,11 @@ import (
 type DialOptionFunc func(node Node) []grpc.DialOption
 
 type Node struct {
-	NodeID               uint32
-	SigningKey           *ecdsa.PublicKey
-	HttpAddress          string
-	IsReplicationEnabled bool
-	IsApiEnabled         bool
-	IsDisabled           bool
-	MinMonthlyFee        *big.Int
-	IsValidConfig        bool
+	NodeID        uint32
+	SigningKey    *ecdsa.PublicKey
+	HttpAddress   string
+	IsCanonical   bool
+	IsValidConfig bool
 }
 
 func (n *Node) Equals(other Node) bool {
@@ -35,10 +31,7 @@ func (n *Node) Equals(other Node) bool {
 	return n.NodeID == other.NodeID &&
 		n.HttpAddress == other.HttpAddress &&
 		equalsSigningKey &&
-		n.IsReplicationEnabled == other.IsReplicationEnabled &&
-		n.IsApiEnabled == other.IsApiEnabled &&
-		n.IsDisabled == other.IsDisabled &&
-		n.MinMonthlyFee.Cmp(other.MinMonthlyFee) == 0 &&
+		n.IsCanonical == other.IsCanonical &&
 		n.IsValidConfig == other.IsValidConfig
 }
 
@@ -69,7 +62,6 @@ func (node *Node) BuildClient(
 		target,
 		dialOpts...,
 	)
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to create channel at %s: %v", target, err)
 	}

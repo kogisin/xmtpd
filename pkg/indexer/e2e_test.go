@@ -3,9 +3,11 @@ package indexer_test
 import (
 	"context"
 	"database/sql"
-	"github.com/xmtp/xmtpd/pkg/indexer"
 	"testing"
 	"time"
+
+	"github.com/xmtp/xmtpd/pkg/config"
+	"github.com/xmtp/xmtpd/pkg/indexer"
 
 	"github.com/stretchr/testify/require"
 	"github.com/xmtp/xmtpd/pkg/blockchain"
@@ -13,40 +15,47 @@ import (
 	"github.com/xmtp/xmtpd/pkg/envelopes"
 	"github.com/xmtp/xmtpd/pkg/mocks/mlsvalidate"
 	"github.com/xmtp/xmtpd/pkg/testutils"
+	"github.com/xmtp/xmtpd/pkg/testutils/anvil"
 	envelopesTestUtils "github.com/xmtp/xmtpd/pkg/testutils/envelopes"
 	"github.com/xmtp/xmtpd/pkg/topic"
 	"google.golang.org/protobuf/proto"
 )
 
-func startIndexing(t *testing.T) (*sql.DB, *queries.Queries, context.Context, func()) {
+func startIndexing(
+	t *testing.T,
+) (*sql.DB, *queries.Queries, config.ContractsOptions, context.Context) {
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	logger := testutils.NewLog(t)
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	cfg := testutils.GetContractsOptions(t)
+	db, _ := testutils.NewDB(t, ctx)
+
+	rpcUrl := anvil.StartAnvil(t, false)
+	cfg := testutils.NewContractsOptions(t, rpcUrl)
+
 	validationService := mlsvalidate.NewMockMLSValidationService(t)
 
-	indx := indexer.NewIndexer(ctx, logger)
-	err := indx.StartIndexer(db, cfg, validationService)
+	indx, err := indexer.NewIndexer(ctx, logger, db, cfg, validationService)
 	require.NoError(t, err)
+	indx.StartIndexer()
 
-	return db, queries.New(db), ctx, func() {
-		cleanup()
-		cancel()
-	}
+	return db, queries.New(db), cfg, ctx
 }
 
 func messagePublisher(
 	t *testing.T,
 	ctx context.Context,
 	db *sql.DB,
+	contractsCfg config.ContractsOptions,
 ) *blockchain.BlockchainPublisher {
 	payerCfg := testutils.GetPayerOptions(t)
-	contractsCfg := testutils.GetContractsOptions(t)
 	var signer blockchain.TransactionSigner
-	signer, err := blockchain.NewPrivateKeySigner(payerCfg.PrivateKey, contractsCfg.ChainID)
+	signer, err := blockchain.NewPrivateKeySigner(
+		payerCfg.PrivateKey,
+		contractsCfg.AppChain.ChainID,
+	)
 	require.NoError(t, err)
 
-	client, err := blockchain.NewClient(ctx, contractsCfg.RpcUrl)
+	client, err := blockchain.NewClient(ctx, contractsCfg.AppChain.RpcURL)
 	require.NoError(t, err)
 
 	nonceManager := blockchain.NewSQLBackedNonceManager(db, testutils.NewLog(t))
@@ -65,9 +74,8 @@ func messagePublisher(
 }
 
 func TestStoreMessages(t *testing.T) {
-	db, querier, ctx, cleanup := startIndexing(t)
-	publisher := messagePublisher(t, ctx, db)
-	defer cleanup()
+	db, querier, cfg, ctx := startIndexing(t)
+	publisher := messagePublisher(t, ctx, db, cfg)
 
 	message := testutils.RandomBytes(78)
 	groupID := testutils.RandomGroupID()

@@ -4,23 +4,24 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
 	"github.com/stretchr/testify/require"
 	db2 "github.com/xmtp/xmtpd/pkg/db"
 	"github.com/xmtp/xmtpd/pkg/db/queries"
 	"github.com/xmtp/xmtpd/pkg/testutils"
-	"sync"
-	"testing"
-	"time"
 )
 
 func TestFillRows(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 
-	err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+	_, err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
 		PendingNonce: 0,
 		NumElements:  100,
 	})
@@ -29,14 +30,13 @@ func TestFillRows(t *testing.T) {
 
 func TestEmptyRows(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 	_, err := querier.GetNextAvailableNonce(ctx)
 	require.Error(t, err)
 
-	err = querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+	_, err = querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
 		PendingNonce: 0,
 		NumElements:  100,
 	})
@@ -84,12 +84,11 @@ func failNextPayerSequence(t *testing.T, ctx context.Context, db *sql.DB) (int64
 
 func TestConcurrentReads(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 
-	err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+	_, err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
 		PendingNonce: 0,
 		NumElements:  100,
 	})
@@ -137,12 +136,11 @@ func TestConcurrentReads(t *testing.T) {
 
 func TestRequestsUnused(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 
-	err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+	_, err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
 		PendingNonce: 0,
 		NumElements:  100,
 	})
@@ -159,16 +157,15 @@ func TestRequestsUnused(t *testing.T) {
 	seq, err = querier.GetNextAvailableNonce(ctx)
 	require.NoError(t, err)
 	require.EqualValues(t, 0, seq)
-
 }
+
 func TestRequestsUsed(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 
-	err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+	_, err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
 		PendingNonce: 0,
 		NumElements:  100,
 	})
@@ -185,17 +182,15 @@ func TestRequestsUsed(t *testing.T) {
 	seq, err = getNextPayerSequence(t, ctx, db)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, seq)
-
 }
 
 func TestRequestsFailed(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 
-	err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+	_, err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
 		PendingNonce: 0,
 		NumElements:  100,
 	})
@@ -214,17 +209,15 @@ func TestRequestsFailed(t *testing.T) {
 	seq, err = getNextPayerSequence(t, ctx, db)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, seq)
-
 }
 
 func TestFillerCanProceedWithOpenTxn(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 
-	err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+	_, err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
 		PendingNonce: 0,
 		NumElements:  10,
 	})
@@ -247,42 +240,41 @@ func TestFillerCanProceedWithOpenTxn(t *testing.T) {
 	_, err = txQuerier.GetNextAvailableNonce(ctx)
 	require.NoError(t, err)
 
-	err = querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+	_, err = querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
 		PendingNonce: 0,
 		NumElements:  30,
 	})
 	require.NoError(t, err)
-
 }
 
 func TestFillerRerun(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 
-	err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+	cnt, err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
 		PendingNonce: 0,
 		NumElements:  10,
 	})
 	require.NoError(t, err)
+	require.EqualValues(t, 10, cnt)
 
-	err = querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+	cnt, err = querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
 		PendingNonce: 0,
 		NumElements:  30,
 	})
 	require.NoError(t, err)
+	require.EqualValues(t, 20, cnt)
 }
 
 func TestAbandonNonces(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 
-	err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+	_, err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
 		PendingNonce: 0,
 		NumElements:  10,
 	})
@@ -295,17 +287,15 @@ func TestAbandonNonces(t *testing.T) {
 	require.NoError(t, err)
 
 	require.EqualValues(t, 5, nonce)
-
 }
 
 func TestAbandonCanProceedWithOpenTxn(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 
-	err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+	_, err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
 		PendingNonce: 0,
 		NumElements:  10,
 	})
@@ -335,17 +325,15 @@ func TestAbandonCanProceedWithOpenTxn(t *testing.T) {
 	require.NoError(t, err)
 
 	require.EqualValues(t, 5, nonce)
-
 }
 
 func TestAbandonSkipsOpenTxn(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 
-	err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+	_, err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
 		PendingNonce: 0,
 		NumElements:  10,
 	})
@@ -380,5 +368,82 @@ func TestAbandonSkipsOpenTxn(t *testing.T) {
 	require.NoError(t, err)
 
 	require.EqualValues(t, 0, nonce)
+}
 
+func TestAbandonConcurrently(t *testing.T) {
+	ctx := context.Background()
+	db, _ := testutils.NewDB(t, ctx)
+
+	querier := queries.New(db)
+
+	_, err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+		PendingNonce: 0,
+		NumElements:  500,
+	})
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	numClients := 20
+	numDeletions := int64(0)
+
+	for i := 1; i <= numClients; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			numrows, err := querier.DeleteObsoleteNonces(ctx, int64(10*i))
+			if err != nil {
+				t.Errorf("Error deleting nonces: %v", err)
+			}
+			atomic.AddInt64(&numDeletions, numrows)
+		}()
+	}
+
+	// Wait for all goroutines to complete
+	wg.Wait()
+	require.EqualValues(t, 200, numDeletions)
+}
+
+func TestAbandonConcurrentlyWithOpenTransaction(t *testing.T) {
+	ctx := context.Background()
+	db, _ := testutils.NewDB(t, ctx)
+
+	querier := queries.New(db)
+
+	_, err := querier.FillNonceSequence(ctx, queries.FillNonceSequenceParams{
+		PendingNonce: 0,
+		NumElements:  500,
+	})
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	numClients := 20
+	numDeletions := int64(0)
+
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{})
+	require.NoError(t, err)
+
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	// hold this TX open
+	txQuerier := queries.New(db).WithTx(tx)
+
+	_, err = txQuerier.GetNextAvailableNonce(ctx)
+	require.NoError(t, err)
+
+	for i := 1; i <= numClients; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			numrows, err := querier.DeleteObsoleteNonces(ctx, int64(10*i))
+			if err != nil {
+				t.Errorf("Error deleting nonces: %v", err)
+			}
+			atomic.AddInt64(&numDeletions, numrows)
+		}()
+	}
+
+	wg.Wait()
+	require.EqualValues(t, 199, numDeletions)
 }

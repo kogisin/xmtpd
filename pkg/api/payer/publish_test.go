@@ -3,13 +3,16 @@ package payer_test
 import (
 	"context"
 	"testing"
+	"time"
+
+	"github.com/xmtp/xmtpd/pkg/constants"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"github.com/xmtp/xmtpd/contracts/pkg/identityupdates"
+	iu "github.com/xmtp/xmtpd/pkg/abi/identityupdatebroadcaster"
 	"github.com/xmtp/xmtpd/pkg/api/payer"
 	"github.com/xmtp/xmtpd/pkg/envelopes"
 	blockchainMocks "github.com/xmtp/xmtpd/pkg/mocks/blockchain"
@@ -65,8 +68,9 @@ func (m *MockSubscribeSyncCursorClient) Recv() (*metadata_api.GetSyncCursorRespo
 
 func buildPayerService(
 	t *testing.T,
-) (*payer.Service, *blockchainMocks.MockIBlockchainPublisher, *registryMocks.MockNodeRegistry, *metadataMocks.MockMetadataApiClient, func()) {
+) (*payer.Service, *blockchainMocks.MockIBlockchainPublisher, *registryMocks.MockNodeRegistry, *metadataMocks.MockMetadataApiClient) {
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	log := testutils.NewLog(t)
 	privKey, err := crypto.GenerateKey()
 	require.NoError(t, err)
@@ -85,18 +89,16 @@ func buildPayerService(
 		&FixedMetadataApiClientConstructor{
 			mockClient: metaMocks,
 		},
+		nil,
 	)
 	require.NoError(t, err)
 
-	return payerService, mockMessagePublisher, mockRegistry, metaMocks, func() {
-		cancel()
-	}
+	return payerService, mockMessagePublisher, mockRegistry, metaMocks
 }
 
 func TestPublishIdentityUpdate(t *testing.T) {
 	ctx := context.Background()
-	svc, mockMessagePublisher, registryMocks, metaMocks, cleanup := buildPayerService(t)
-	defer cleanup()
+	svc, mockMessagePublisher, registryMocks, metaMocks := buildPayerService(t)
 
 	inboxId := testutils.RandomInboxId()
 	inboxIdBytes, err := utils.ParseInboxId(inboxId)
@@ -138,7 +140,7 @@ func TestPublishIdentityUpdate(t *testing.T) {
 
 	mockMessagePublisher.EXPECT().
 		PublishIdentityUpdate(mock.Anything, mock.Anything, mock.Anything).
-		Return(&identityupdates.IdentityUpdatesIdentityUpdateCreated{
+		Return(&iu.IdentityUpdateBroadcasterIdentityUpdateCreated{
 			Raw: types.Log{
 				TxHash: txnHash,
 			},
@@ -171,12 +173,10 @@ func TestPublishIdentityUpdate(t *testing.T) {
 }
 
 func TestPublishToNodes(t *testing.T) {
-	originatorServer, _, _, originatorCleanup := apiTestUtils.NewTestAPIServer(t)
-	defer originatorCleanup()
+	originatorServer, _, _ := apiTestUtils.NewTestAPIServer(t)
 
 	ctx := context.Background()
-	svc, _, mockRegistry, _, cleanup := buildPayerService(t)
-	defer cleanup()
+	svc, _, mockRegistry, _ := buildPayerService(t)
 
 	mockRegistry.EXPECT().GetNode(mock.Anything).Return(&registry.Node{
 		HttpAddress: formatAddress(originatorServer.Addr().String()),
@@ -211,4 +211,23 @@ func TestPublishToNodes(t *testing.T) {
 
 	targetOriginator := parsedOriginatorEnvelope.UnsignedOriginatorEnvelope.PayerEnvelope.TargetOriginator
 	require.EqualValues(t, 100, targetOriginator)
+
+	// expiry assumptions
+	require.EqualValues(
+		t,
+		constants.DEFAULT_STORAGE_DURATION_DAYS,
+		parsedOriginatorEnvelope.UnsignedOriginatorEnvelope.PayerEnvelope.RetentionDays(),
+	)
+
+	expiryTime := parsedOriginatorEnvelope.UnsignedOriginatorEnvelope.Proto().GetExpiryUnixtime()
+	expectedExpiry := time.Now().
+		Add(time.Duration(constants.DEFAULT_STORAGE_DURATION_DAYS) * 24 * time.Hour).
+		Unix()
+	require.InDelta(
+		t,
+		expectedExpiry,
+		expiryTime,
+		10,
+		"expiry time should be roughly now + DEFAULT_STORAGE_DURATION_DAYS",
+	)
 }

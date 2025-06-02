@@ -7,11 +7,16 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 	"time"
 
-	"github.com/xmtp/xmtpd/contracts/pkg/ratesmanager"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/xmtp/xmtpd/pkg/blockchain/migrator"
 	"github.com/xmtp/xmtpd/pkg/config"
+	"github.com/xmtp/xmtpd/pkg/fees"
+	"github.com/xmtp/xmtpd/pkg/stress"
 
 	"github.com/jessevdk/go-flags"
 	"github.com/xmtp/xmtpd/pkg/blockchain"
@@ -23,21 +28,21 @@ var Version string = "unknown"
 
 type CLI struct {
 	config.GlobalOptions
-	Command                          string
-	AdminOptions                     config.AdminOptions
-	NodeManagerOptions               config.NodeManagerOptions
-	GetPubKey                        config.GetPubKeyOptions
-	GenerateKey                      config.GenerateKeyOptions
-	RegisterNode                     config.RegisterNodeOptions
-	GetAllNodes                      config.GetAllNodesOptions
-	SetHttpAddress                   config.SetHttpAddressOptions
-	MigrateNodes                     config.MigrateNodesOptions
-	NodeOperator                     config.NodeOperatorOptions
-	SetMinMonthlyFee                 config.SetMinMonthlyFeeOptions
-	SetMaxActiveNodes                config.SetMaxActiveNodesOptions
-	SetNodeOperatorCommissionPercent config.SetNodeOperatorCommissionPercentOptions
-	GetOptions                       config.GetOptions
-	AddRates                         config.AddRatesOptions
+	Command                string
+	GetPubKey              config.GetPubKeyOptions
+	GenerateKey            config.GenerateKeyOptions
+	RegisterNode           config.RegisterNodeOptions
+	NetworkAdminOptions    config.NetworkAdminOptions
+	GetAllNodes            config.GetAllNodesOptions
+	GetNode                config.GetNodeOptions
+	SetHttpAddress         config.SetHttpAddressOptions
+	MigrateNodes           config.MigrateNodesOptions
+	AddRates               config.AddRatesOptions
+	GetRates               config.GetRatesOptions
+	IdentityUpdatesStress  config.IdentityUpdatesStressOptions
+	Watcher                config.WatcherOptions
+	GetMaxCanonicalOptions config.GetMaxCanonicalOptions
+	SetMaxCanonicalOptions config.SetMaxCanonicalOptions
 }
 
 /*
@@ -51,21 +56,20 @@ the options for each subcommand.
 */
 func parseOptions(args []string) (*CLI, error) {
 	var options config.GlobalOptions
-	var adminOptions config.AdminOptions
-	var nodeManagerOptions config.NodeManagerOptions
 	var generateKeyOptions config.GenerateKeyOptions
 	var registerNodeOptions config.RegisterNodeOptions
+	var networkAdminOptions config.NetworkAdminOptions
 	var getPubKeyOptions config.GetPubKeyOptions
 	var getAllNodesOptions config.GetAllNodesOptions
 	var setHttpAddressOptions config.SetHttpAddressOptions
 	var migrateNodesOptions config.MigrateNodesOptions
-	var nodeOperatorOptions config.NodeOperatorOptions
-	var setMinMonthlyFeeOptions config.SetMinMonthlyFeeOptions
-	var setMaxActiveNodesOptions config.SetMaxActiveNodesOptions
-	var setNodeOperatorCommissionPercentOptions config.SetNodeOperatorCommissionPercentOptions
-	var getOptions config.GetOptions
 	var addRatesOptions config.AddRatesOptions
-
+	var getRatesOptions config.GetRatesOptions
+	var getNodeOptions config.GetNodeOptions
+	var identityUpdatesStressOptions config.IdentityUpdatesStressOptions
+	var watcherOptions config.WatcherOptions
+	var getMaxCanonicalOptions config.GetMaxCanonicalOptions
+	var setMaxCanonicalOptions config.SetMaxCanonicalOptions
 	parser := flags.NewParser(&options, flags.Default)
 
 	// Admin commands
@@ -78,61 +82,47 @@ func parseOptions(args []string) (*CLI, error) {
 	if _, err := parser.AddCommand("register-node", "Register a node", "", &registerNodeOptions); err != nil {
 		return nil, fmt.Errorf("could not add register-node command: %s", err)
 	}
+	if _, err := parser.AddCommand("add-node-to-network", "Add a node to the network", "", &networkAdminOptions); err != nil {
+		return nil, fmt.Errorf("could not add add-node-to-network command: %s", err)
+	}
+	if _, err := parser.AddCommand("remove-node-from-network", "Remove a node from the network", "", &networkAdminOptions); err != nil {
+		return nil, fmt.Errorf("could not add remove-node-from-network command: %s", err)
+	}
+	if _, err := parser.AddCommand("set-max-canonical", "Set the maximum canonical size", "", &setMaxCanonicalOptions); err != nil {
+		return nil, fmt.Errorf("could not add set-max-canonical command: %s", err)
+	}
 	if _, err := parser.AddCommand("migrate-nodes", "Migrate nodes from a file", "", &migrateNodesOptions); err != nil {
 		return nil, fmt.Errorf("could not add migrate-nodes command: %s", err)
-	}
-	if _, err := parser.AddCommand("disable-node", "Disable a node", "", &adminOptions); err != nil {
-		return nil, fmt.Errorf("could not add disable-node command: %s", err)
-	}
-	if _, err := parser.AddCommand("enable-node", "Enable a node", "", &adminOptions); err != nil {
-		return nil, fmt.Errorf("could not add enable-node command: %s", err)
-	}
-	if _, err := parser.AddCommand("remove-from-api-nodes", "Remove a node from the API nodes", "", &adminOptions); err != nil {
-		return nil, fmt.Errorf("could not add remove-from-api-nodes command: %s", err)
-	}
-	if _, err := parser.AddCommand("remove-from-replication-nodes", "Remove a node from the replication nodes", "", &adminOptions); err != nil {
-		return nil, fmt.Errorf("could not add remove-from-replication-nodes command: %s", err)
 	}
 	if _, err := parser.AddCommand("set-http-address", "Set the HTTP address of a node", "", &setHttpAddressOptions); err != nil {
 		return nil, fmt.Errorf("could not add set-http-address command: %s", err)
 	}
-	if _, err := parser.AddCommand("set-min-monthly-fee", "Set the minimum monthly fee of a node", "", &setMinMonthlyFeeOptions); err != nil {
-		return nil, fmt.Errorf("could not add set-min-monthly-fee command: %s", err)
-	}
-	if _, err := parser.AddCommand("set-max-active-nodes", "Set the maximum number of active nodes", "", &setMaxActiveNodesOptions); err != nil {
-		return nil, fmt.Errorf("could not add set-max-active-nodes command: %s", err)
-	}
-	if _, err := parser.AddCommand("set-node-operator-commission-percent", "Set the node operator commission percent", "", &setNodeOperatorCommissionPercentOptions); err != nil {
-		return nil, fmt.Errorf(
-			"could not add set-node-operator-commission-percent command: %s",
-			err,
-		)
-	}
-
-	// Node operator commands
-	if _, err := parser.AddCommand("set-api-enabled", "Set API enabled for a node", "", &nodeOperatorOptions); err != nil {
-		return nil, fmt.Errorf("could not add set-api-enabled command: %s", err)
-	}
-	if _, err := parser.AddCommand("set-replication-enabled", "Set replication enabled for a node", "", &nodeOperatorOptions); err != nil {
-		return nil, fmt.Errorf("could not add set-replication-enabled command: %s", err)
+	if _, err := parser.AddCommand("add-rates", "Add rates of the rates manager", "", &addRatesOptions); err != nil {
+		return nil, fmt.Errorf("could not add add-rates command: %s", err)
 	}
 
 	// Getter commands
 	if _, err := parser.AddCommand("get-all-nodes", "Get all nodes from the registry", "", &getAllNodesOptions); err != nil {
 		return nil, fmt.Errorf("could not add get-all-nodes command: %s", err)
 	}
-	if _, err := parser.AddCommand("get-active-api-nodes", "Get all active API nodes from the registry", "", &getOptions); err != nil {
-		return nil, fmt.Errorf("could not add get-active-api-nodes command: %s", err)
-	}
-	if _, err := parser.AddCommand("get-active-replication-nodes", "Get all active replication nodes from the registry", "", &getOptions); err != nil {
-		return nil, fmt.Errorf("could not add get-active-replication-nodes command: %s", err)
-	}
-	if _, err := parser.AddCommand("get-node", "Get a node from the registry", "", &getOptions); err != nil {
+	if _, err := parser.AddCommand("get-node", "Get a node from the registry", "", &getNodeOptions); err != nil {
 		return nil, fmt.Errorf("could not add get-node command: %s", err)
 	}
-	if _, err := parser.AddCommand("add-rates", "Add rates to the rates manager", "", &addRatesOptions); err != nil {
-		return nil, fmt.Errorf("Could not add add-rates command: %s", err)
+	if _, err := parser.AddCommand("get-rates", "Get rates of the rates manager", "", &getRatesOptions); err != nil {
+		return nil, fmt.Errorf("could not add get-rates command: %s", err)
 	}
+	if _, err := parser.AddCommand("get-max-canonical-nodes", "Get max canonical nodes for network", "", &getMaxCanonicalOptions); err != nil {
+		return nil, fmt.Errorf("could not add get-rates command: %s", err)
+	}
+
+	// Dev commands
+	if _, err := parser.AddCommand("identity-updates-stress", "Stress the identity updates contract", "", &identityUpdatesStressOptions); err != nil {
+		return nil, fmt.Errorf("could not add identity-updates-stress command: %s", err)
+	}
+	if _, err := parser.AddCommand("start-watcher", "Start the blockchain watcher", "", &watcherOptions); err != nil {
+		return nil, fmt.Errorf("could not add start-watcher command: %s", err)
+	}
+
 	if _, err := parser.ParseArgs(args); err != nil {
 		if err, ok := err.(*flags.Error); !ok || err.Type != flags.ErrHelp {
 			return nil, fmt.Errorf("could not parse options: %s", err)
@@ -144,23 +134,27 @@ func parseOptions(args []string) (*CLI, error) {
 		return nil, errors.New("no command provided")
 	}
 
+	if err := config.ParseJSONConfig(&options.Contracts); err != nil {
+		return nil, fmt.Errorf("could not parse contracts JSON config: %s", err)
+	}
+
 	return &CLI{
 		options,
 		parser.Active.Name,
-		adminOptions,
-		nodeManagerOptions,
 		getPubKeyOptions,
 		generateKeyOptions,
 		registerNodeOptions,
+		networkAdminOptions,
 		getAllNodesOptions,
+		getNodeOptions,
 		setHttpAddressOptions,
 		migrateNodesOptions,
-		nodeOperatorOptions,
-		setMinMonthlyFeeOptions,
-		setMaxActiveNodesOptions,
-		setNodeOperatorCommissionPercentOptions,
-		getOptions,
 		addRatesOptions,
+		getRatesOptions,
+		identityUpdatesStressOptions,
+		watcherOptions,
+		getMaxCanonicalOptions,
+		setMaxCanonicalOptions,
 	}, nil
 }
 
@@ -203,12 +197,20 @@ Admin commands
 */
 
 func registerNode(logger *zap.Logger, options *CLI) {
+	if !options.RegisterNode.Force &&
+		isPubKeyAlreadyRegistered(logger, options, options.RegisterNode.SigningKeyPub) {
+		logger.Info(
+			"provided public key is already registered",
+			zap.String("pub-key", options.RegisterNode.SigningKeyPub),
+		)
+		return
+	}
+
 	ctx := context.Background()
-	registryAdmin, err := setupRegistryAdmin(
+	registryAdmin, err := setupNodeRegistryAdmin(
 		ctx,
 		logger,
 		options.RegisterNode.AdminOptions.AdminPrivateKey,
-		options.Contracts.ChainID,
 		options,
 	)
 	if err != nil {
@@ -220,367 +222,22 @@ func registerNode(logger *zap.Logger, options *CLI) {
 		logger.Fatal("could not decompress public key", zap.Error(err))
 	}
 
-	minMonthlyFee := int64(0)
-	if options.RegisterNode.MinMonthlyFee < 0 {
-		logger.Fatal("provided negative min monthly fee is not allowed")
-	}
-	minMonthlyFee = options.RegisterNode.MinMonthlyFee
-
 	err = registryAdmin.AddNode(
 		ctx,
 		options.RegisterNode.OwnerAddress,
 		signingKeyPub,
 		options.RegisterNode.HttpAddress,
-		minMonthlyFee,
 	)
 	if err != nil {
 		logger.Fatal("could not add node", zap.Error(err))
 	}
 }
 
-func disableNode(logger *zap.Logger, options *CLI) {
-	ctx := context.Background()
-	registryAdmin, err := setupRegistryAdmin(
-		ctx,
-		logger,
-		options.AdminOptions.AdminPrivateKey,
-		options.Contracts.ChainID,
-		options,
+func isPubKeyAlreadyRegistered(logger *zap.Logger, options *CLI, pubKey string) bool {
+	chainClient, err := blockchain.NewClient(
+		context.Background(),
+		options.Contracts.SettlementChain.RpcURL,
 	)
-	if err != nil {
-		logger.Fatal("could not setup registry admin", zap.Error(err))
-	}
-
-	err = registryAdmin.DisableNode(
-		ctx,
-		options.AdminOptions.NodeId,
-	)
-	if err != nil {
-		logger.Fatal("could not disable node", zap.Error(err))
-	}
-}
-
-func enableNode(logger *zap.Logger, options *CLI) {
-	ctx := context.Background()
-	registryAdmin, err := setupRegistryAdmin(
-		ctx,
-		logger,
-		options.AdminOptions.AdminPrivateKey,
-		options.Contracts.ChainID,
-		options,
-	)
-	if err != nil {
-		logger.Fatal("could not setup registry admin", zap.Error(err))
-	}
-
-	err = registryAdmin.EnableNode(
-		ctx,
-		options.AdminOptions.NodeId,
-	)
-	if err != nil {
-		logger.Fatal("could not enable node", zap.Error(err))
-	}
-}
-
-func removeFromApiNodes(logger *zap.Logger, options *CLI) {
-	ctx := context.Background()
-	registryAdmin, err := setupRegistryAdmin(
-		ctx,
-		logger,
-		options.AdminOptions.AdminPrivateKey,
-		options.Contracts.ChainID,
-		options,
-	)
-	if err != nil {
-		logger.Fatal("could not setup registry admin", zap.Error(err))
-	}
-
-	err = registryAdmin.RemoveFromApiNodes(
-		ctx,
-		options.AdminOptions.NodeId,
-	)
-	if err != nil {
-		logger.Fatal("could not remove from api nodes", zap.Error(err))
-	}
-}
-
-func removeFromReplicationNodes(logger *zap.Logger, options *CLI) {
-	ctx := context.Background()
-	registryAdmin, err := setupRegistryAdmin(
-		ctx,
-		logger,
-		options.AdminOptions.AdminPrivateKey,
-		options.Contracts.ChainID,
-		options,
-	)
-	if err != nil {
-		logger.Fatal("could not setup registry admin", zap.Error(err))
-	}
-
-	err = registryAdmin.RemoveFromReplicationNodes(
-		ctx,
-		options.AdminOptions.NodeId,
-	)
-	if err != nil {
-		logger.Fatal("could not remove from replication nodes", zap.Error(err))
-	}
-}
-
-func migrateNodes(logger *zap.Logger, options *CLI) {
-	ctx := context.Background()
-	nodes, err := migrator.ImportNodesFromFile(options.MigrateNodes.InFile)
-	if err != nil {
-		logger.Fatal("could not import nodes from file", zap.Error(err))
-	}
-
-	newRegistryAdmin, err := setupRegistryAdmin(
-		ctx,
-		logger,
-		options.MigrateNodes.AdminOptions.AdminPrivateKey,
-		options.Contracts.ChainID,
-		options,
-	)
-	if err != nil {
-		logger.Fatal("could not setup registry admin", zap.Error(err))
-	}
-
-	err = migrator.WriteToRegistry(logger, nodes, newRegistryAdmin)
-	if err != nil {
-		logger.Fatal("could not write nodes to registry", zap.Error(err))
-	}
-}
-
-func setMaxActiveNodes(logger *zap.Logger, options *CLI) {
-	ctx := context.Background()
-	registryAdmin, err := setupRegistryAdmin(
-		ctx,
-		logger,
-		options.SetMaxActiveNodes.AdminOptions.AdminPrivateKey,
-		options.Contracts.ChainID,
-		options,
-	)
-	if err != nil {
-		logger.Fatal("could not setup registry admin", zap.Error(err))
-	}
-
-	err = registryAdmin.SetMaxActiveNodes(
-		ctx,
-		options.SetMaxActiveNodes.MaxActiveNodes,
-	)
-	if err != nil {
-		logger.Fatal("could not set max active nodes", zap.Error(err))
-	}
-}
-
-func setNodeOperatorCommissionPercent(logger *zap.Logger, options *CLI) {
-	ctx := context.Background()
-	registryAdmin, err := setupRegistryAdmin(
-		ctx,
-		logger,
-		options.SetNodeOperatorCommissionPercent.AdminOptions.AdminPrivateKey,
-		options.Contracts.ChainID,
-		options,
-	)
-	if err != nil {
-		logger.Fatal("could not setup registry admin", zap.Error(err))
-	}
-
-	err = registryAdmin.SetNodeOperatorCommissionPercent(
-		ctx,
-		options.SetNodeOperatorCommissionPercent.CommissionPercent,
-	)
-	if err != nil {
-		logger.Fatal("could not set node operator commission percent", zap.Error(err))
-	}
-}
-
-func addRates(logger *zap.Logger, options *CLI) {
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Second*15))
-	defer cancel()
-	chainClient, err := blockchain.NewClient(ctx, options.Contracts.RpcUrl)
-	if err != nil {
-		logger.Fatal("could not create chain client", zap.Error(err))
-	}
-
-	signer, err := blockchain.NewPrivateKeySigner(
-		options.AddRates.AdminPrivateKey,
-		options.Contracts.ChainID,
-	)
-	if err != nil {
-		logger.Fatal("could not create signer", zap.Error(err))
-	}
-
-	ratesManager, err := blockchain.NewRatesAdmin(
-		logger,
-		chainClient,
-		signer,
-		options.Contracts,
-	)
-	if err != nil {
-		logger.Fatal("could not create rates admin", zap.Error(err))
-	}
-
-	startTime := time.Now().Add(time.Duration(options.AddRates.DelayDays) * 24 * time.Hour)
-
-	rates := ratesmanager.RatesManagerRates{
-		MessageFee:    options.AddRates.MessageFee,
-		StorageFee:    options.AddRates.StorageFee,
-		CongestionFee: options.AddRates.CongestionFee,
-		StartTime:     uint64(startTime.Unix()),
-	}
-
-	if err = ratesManager.AddRates(ctx, rates); err != nil {
-		logger.Fatal("could not add rates", zap.Error(err))
-	}
-
-	logger.Info("added rates", zap.Any("rates", rates))
-}
-
-/*
-*
-Node manager commands
-*
-*/
-
-func setHttpAddress(logger *zap.Logger, options *CLI) {
-	ctx := context.Background()
-	registryAdmin, err := setupRegistryAdmin(
-		ctx,
-		logger,
-		options.SetHttpAddress.NodeManagerOptions.NodePrivateKey,
-		options.Contracts.ChainID,
-		options,
-	)
-	if err != nil {
-		logger.Fatal("could not setup registry admin", zap.Error(err))
-	}
-
-	err = registryAdmin.SetHttpAddress(
-		ctx,
-		options.NodeManagerOptions.NodeId,
-		options.SetHttpAddress.Address,
-	)
-	if err != nil {
-		logger.Fatal("could not set http address", zap.Error(err))
-	}
-}
-
-func setMinMonthlyFee(logger *zap.Logger, options *CLI) {
-	ctx := context.Background()
-	registryAdmin, err := setupRegistryAdmin(
-		ctx,
-		logger,
-		options.SetMinMonthlyFee.NodeManagerOptions.NodePrivateKey,
-		options.Contracts.ChainID,
-		options,
-	)
-	if err != nil {
-		logger.Fatal("could not setup registry admin", zap.Error(err))
-	}
-
-	if options.SetMinMonthlyFee.MinMonthlyFee < 0 {
-		logger.Fatal("invalid negative minMonthlyFee provided")
-	}
-
-	err = registryAdmin.SetMinMonthlyFee(
-		ctx,
-		options.NodeManagerOptions.NodeId,
-		options.SetMinMonthlyFee.MinMonthlyFee,
-	)
-	if err != nil {
-		logger.Fatal("could not set min monthly fee", zap.Error(err))
-	}
-}
-
-/*
-*
-Node operator commands
-*
-*/
-
-func setApiEnabled(logger *zap.Logger, options *CLI) {
-	ctx := context.Background()
-	registryAdmin, err := setupRegistryAdmin(
-		ctx,
-		logger,
-		options.NodeOperator.NodePrivateKey,
-		options.Contracts.ChainID,
-		options,
-	)
-	if err != nil {
-		logger.Fatal("could not setup registry admin", zap.Error(err))
-	}
-
-	err = registryAdmin.SetIsApiEnabled(
-		ctx,
-		options.NodeOperator.NodeId,
-		options.NodeOperator.Enable,
-	)
-	if err != nil {
-		logger.Fatal("could not set API enabled", zap.Error(err))
-	}
-}
-
-func setReplicationEnabled(logger *zap.Logger, options *CLI) {
-	ctx := context.Background()
-	registryAdmin, err := setupRegistryAdmin(
-		ctx,
-		logger,
-		options.NodeOperator.NodePrivateKey,
-		options.Contracts.ChainID,
-		options,
-	)
-	if err != nil {
-		logger.Fatal("could not setup registry admin", zap.Error(err))
-	}
-
-	err = registryAdmin.SetIsReplicationEnabled(
-		ctx,
-		options.NodeOperator.NodeId,
-		options.NodeOperator.Enable,
-	)
-	if err != nil {
-		logger.Fatal("could not set replication enabled", zap.Error(err))
-	}
-}
-
-/*
-*
-Getter commands
-*
-*/
-
-func getActiveApiNodes(logger *zap.Logger, options *CLI) {
-	ctx := context.Background()
-	chainClient, err := blockchain.NewClient(ctx, options.Contracts.RpcUrl)
-	if err != nil {
-		logger.Fatal("could not create chain client", zap.Error(err))
-	}
-
-	caller, err := blockchain.NewNodeRegistryCaller(
-		logger,
-		chainClient,
-		options.Contracts,
-	)
-	if err != nil {
-		logger.Fatal("could not create registry caller", zap.Error(err))
-	}
-
-	nodes, err := caller.GetActiveApiNodes(ctx)
-	if err != nil {
-		logger.Fatal("could not retrieve nodes from registry", zap.Error(err))
-	}
-
-	logger.Info(
-		"got nodes",
-		zap.Int("size", len(nodes)),
-		zap.Any("nodes", nodes),
-	)
-}
-
-func getActiveReplicationNodes(logger *zap.Logger, options *CLI) {
-	ctx := context.Background()
-	chainClient, err := blockchain.NewClient(ctx, options.Contracts.RpcUrl)
 	if err != nil {
 		logger.Fatal("could not create chain client", zap.Error(err))
 	}
@@ -594,21 +251,228 @@ func getActiveReplicationNodes(logger *zap.Logger, options *CLI) {
 		logger.Fatal("could not create registry admin", zap.Error(err))
 	}
 
-	nodes, err := caller.GetActiveReplicationNodes(ctx)
+	nodes, err := migrator.ReadFromRegistry(caller)
 	if err != nil {
-		logger.Fatal("could not retrieve nodes from registry", zap.Error(err))
+		logger.Fatal(
+			"could not retrieve migrated nodes from registry",
+			zap.Error(err),
+			zap.Any("contracts", options.Contracts),
+		)
 	}
 
-	logger.Info(
-		"got nodes",
-		zap.Int("size", len(nodes)),
-		zap.Any("nodes", nodes),
+	for _, node := range nodes {
+		if node.SigningKeyPub == pubKey {
+			return true
+		}
+	}
+
+	return false
+}
+
+func addNodeToNetwork(logger *zap.Logger, options *CLI) {
+	ctx := context.Background()
+	registryAdmin, err := setupNodeRegistryAdmin(
+		ctx,
+		logger,
+		options.NetworkAdminOptions.AdminOptions.AdminPrivateKey,
+		options,
 	)
+	if err != nil {
+		logger.Fatal("could not setup registry admin", zap.Error(err))
+	}
+
+	err = registryAdmin.AddToNetwork(
+		ctx,
+		options.NetworkAdminOptions.NodeId,
+	)
+	if err != nil {
+		logger.Fatal("could not add node to network", zap.Error(err))
+	}
+}
+
+func setMaxCanonical(logger *zap.Logger, options *CLI) {
+	ctx := context.Background()
+	registryAdmin, err := setupNodeRegistryAdmin(
+		ctx,
+		logger,
+		options.SetMaxCanonicalOptions.AdminOptions.AdminPrivateKey,
+		options,
+	)
+	if err != nil {
+		logger.Fatal("could not setup registry admin", zap.Error(err))
+	}
+
+	err = registryAdmin.SetMaxCanonical(
+		ctx,
+		options.SetMaxCanonicalOptions.Limit,
+	)
+	if err != nil {
+		logger.Fatal("could not set max canonical", zap.Error(err))
+	}
+}
+
+func removeNodeFromNetwork(logger *zap.Logger, options *CLI) {
+	ctx := context.Background()
+	registryAdmin, err := setupNodeRegistryAdmin(
+		ctx,
+		logger,
+		options.NetworkAdminOptions.AdminOptions.AdminPrivateKey,
+		options,
+	)
+	if err != nil {
+		logger.Fatal("could not setup registry admin", zap.Error(err))
+	}
+
+	err = registryAdmin.RemoveFromNetwork(
+		ctx,
+		options.NetworkAdminOptions.NodeId,
+	)
+	if err != nil {
+		logger.Fatal("could not remove node from network", zap.Error(err))
+	}
+}
+
+func migrateNodes(logger *zap.Logger, options *CLI) {
+	ctx := context.Background()
+	nodes, err := migrator.ImportNodesFromFile(options.MigrateNodes.InFile)
+	if err != nil {
+		logger.Fatal("could not import nodes from file", zap.Error(err))
+	}
+
+	newRegistryAdmin, err := setupNodeRegistryAdmin(
+		ctx,
+		logger,
+		options.MigrateNodes.AdminOptions.AdminPrivateKey,
+		options,
+	)
+	if err != nil {
+		logger.Fatal("could not setup registry admin", zap.Error(err))
+	}
+
+	err = migrator.WriteToRegistry(logger, nodes, newRegistryAdmin)
+	if err != nil {
+		logger.Fatal("could not write nodes to registry", zap.Error(err))
+	}
+}
+
+func getRates(logger *zap.Logger, options *CLI) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Second*15))
+	defer cancel()
+	chainClient, err := blockchain.NewClient(ctx, options.Contracts.SettlementChain.RpcURL)
+	if err != nil {
+		logger.Fatal("could not create chain client", zap.Error(err))
+	}
+
+	fetcher, err := fees.NewContractRatesFetcher(ctx, chainClient, logger, options.Contracts)
+	if err != nil {
+		logger.Fatal("could not create rates fetcher", zap.Error(err))
+	}
+
+	err = fetcher.Start()
+	if err != nil {
+		if strings.Contains(err.Error(), "no rates found") {
+			logger.Info("no rates found")
+			return
+		}
+		logger.Fatal("could not start rates fetcher", zap.Error(err))
+	}
+
+	rates, err := fetcher.GetRates(time.Now())
+	if err != nil {
+		logger.Fatal("could not get rates", zap.Error(err))
+	}
+
+	logger.Info("rates fetched successfully", zap.Any("rates", rates))
+}
+
+func addRates(logger *zap.Logger, options *CLI) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Second*15))
+	defer cancel()
+
+	registryAdmin, err := setupRateRegistryAdmin(
+		ctx,
+		logger,
+		options.AddRates.AdminOptions.AdminPrivateKey,
+		options.Contracts.SettlementChain.ChainID,
+		options,
+	)
+	if err != nil {
+		logger.Fatal("could not setup registry admin", zap.Error(err))
+	}
+
+	rates := fees.Rates{
+		MessageFee:          options.AddRates.MessageFee,
+		StorageFee:          options.AddRates.StorageFee,
+		CongestionFee:       options.AddRates.CongestionFee,
+		TargetRatePerMinute: options.AddRates.TargetRate,
+	}
+
+	err = registryAdmin.AddRates(ctx, rates)
+	if err != nil {
+		logger.Fatal("could not add rates to registry", zap.Error(err))
+	}
+}
+
+/*
+*
+Node manager commands
+*
+*/
+
+func setHttpAddress(logger *zap.Logger, options *CLI) {
+	ctx := context.Background()
+	registryAdmin, err := setupNodeRegistryAdmin(
+		ctx,
+		logger,
+		options.SetHttpAddress.NodeManagerOptions.NodePrivateKey,
+		options,
+	)
+	if err != nil {
+		logger.Fatal("could not setup registry admin", zap.Error(err))
+	}
+
+	err = registryAdmin.SetHttpAddress(
+		ctx,
+		options.SetHttpAddress.NodeId,
+		options.SetHttpAddress.Address,
+	)
+	if err != nil {
+		logger.Fatal("could not set http address", zap.Error(err))
+	}
+}
+
+/*
+*
+Getter commands
+*
+*/
+
+func getMaxCanonicalNodes(logger *zap.Logger, options *CLI) {
+	ctx := context.Background()
+	chainClient, err := blockchain.NewClient(ctx, options.Contracts.SettlementChain.RpcURL)
+	if err != nil {
+		logger.Fatal("could not create chain client", zap.Error(err))
+	}
+
+	caller, err := blockchain.NewNodeRegistryCaller(
+		logger,
+		chainClient,
+		options.Contracts,
+	)
+	if err != nil {
+		logger.Fatal("could not create registry admin", zap.Error(err))
+	}
+
+	limit, err := caller.GetMaxCanonicalNodes(ctx)
+	if err != nil {
+		logger.Fatal("could not get max canonical nodes", zap.Error(err))
+	}
+	logger.Info("max canonical nodes retrieved successfully", zap.Any("limit", limit))
 }
 
 func getAllNodes(logger *zap.Logger, options *CLI) {
 	ctx := context.Background()
-	chainClient, err := blockchain.NewClient(ctx, options.Contracts.RpcUrl)
+	chainClient, err := blockchain.NewClient(ctx, options.Contracts.SettlementChain.RpcURL)
 	if err != nil {
 		logger.Fatal("could not create chain client", zap.Error(err))
 	}
@@ -643,7 +507,7 @@ func getAllNodes(logger *zap.Logger, options *CLI) {
 
 func getNode(logger *zap.Logger, options *CLI) {
 	ctx := context.Background()
-	chainClient, err := blockchain.NewClient(ctx, options.Contracts.RpcUrl)
+	chainClient, err := blockchain.NewClient(ctx, options.Contracts.SettlementChain.RpcURL)
 	if err != nil {
 		logger.Fatal("could not create chain client", zap.Error(err))
 	}
@@ -657,15 +521,58 @@ func getNode(logger *zap.Logger, options *CLI) {
 		logger.Fatal("could not create registry admin", zap.Error(err))
 	}
 
-	node, err := caller.GetNode(ctx, options.NodeOperator.NodeId)
+	node, err := caller.GetNode(ctx, options.GetNode.NodeId)
 	if err != nil {
-		logger.Fatal("could not retrieve nodes from registry", zap.Error(err))
+		logger.Fatal("could not retrieve node from registry", zap.Error(err))
 	}
 
 	logger.Info(
 		"got nodes",
 		zap.Any("node", node),
 	)
+}
+
+func identityUpdatesStress(logger *zap.Logger, options *CLI) {
+	ctx := context.Background()
+
+	logger.Info(
+		"creating identity updates",
+		zap.Int("count", options.IdentityUpdatesStress.Count),
+		zap.String("contract", options.IdentityUpdatesStress.Contract),
+	)
+
+	err := stress.StressIdentityUpdates(
+		ctx,
+		logger,
+		options.IdentityUpdatesStress.Count,
+		options.IdentityUpdatesStress.Contract,
+		options.IdentityUpdatesStress.Rpc,
+		options.IdentityUpdatesStress.PrivateKey,
+		options.IdentityUpdatesStress.Async,
+	)
+	if err != nil {
+		logger.Fatal("could not create identity updates", zap.Error(err))
+	}
+}
+
+func startChainWatcher(logger *zap.Logger, options *CLI) {
+	ctxwc, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	watcher, err := stress.NewWatcher(
+		ctxwc,
+		logger,
+		options.Watcher.Wss,
+		common.HexToAddress(options.Watcher.Contract),
+	)
+	if err != nil {
+		logger.Fatal("could not create watcher", zap.Error(err))
+	}
+
+	err = watcher.Listen(ctxwc)
+	if err != nil {
+		logger.Fatal("could not listen", zap.Error(err))
+	}
 }
 
 /*
@@ -704,44 +611,20 @@ func main() {
 	case "register-node":
 		registerNode(logger, options)
 		return
-	case "disable-node":
-		disableNode(logger, options)
+	case "add-node-to-network":
+		addNodeToNetwork(logger, options)
 		return
-	case "enable-node":
-		enableNode(logger, options)
+	case "remove-node-from-network":
+		removeNodeFromNetwork(logger, options)
+		return
+	case "set-max-canonical":
+		setMaxCanonical(logger, options)
 		return
 	case "migrate-nodes":
 		migrateNodes(logger, options)
 		return
-	case "remove-from-api-nodes":
-		removeFromApiNodes(logger, options)
-		return
-	case "remove-from-replication-nodes":
-		removeFromReplicationNodes(logger, options)
-		return
 	case "set-http-address":
 		setHttpAddress(logger, options)
-		return
-	case "set-min-monthly-fee":
-		setMinMonthlyFee(logger, options)
-		return
-	case "set-max-active-nodes":
-		setMaxActiveNodes(logger, options)
-		return
-	case "set-node-operator-commission-percent":
-		setNodeOperatorCommissionPercent(logger, options)
-		return
-	case "set-api-enabled":
-		setApiEnabled(logger, options)
-		return
-	case "set-replication-enabled":
-		setReplicationEnabled(logger, options)
-		return
-	case "get-active-api-nodes":
-		getActiveApiNodes(logger, options)
-		return
-	case "get-active-replication-nodes":
-		getActiveReplicationNodes(logger, options)
 		return
 	case "get-all-nodes":
 		getAllNodes(logger, options)
@@ -749,23 +632,74 @@ func main() {
 	case "get-node":
 		getNode(logger, options)
 		return
+	case "get-rates":
+		getRates(logger, options)
+		return
 	case "add-rates":
 		addRates(logger, options)
+		return
+	case "get-max-canonical-nodes":
+		getMaxCanonicalNodes(logger, options)
+		return
+	case "identity-updates-stress":
+		identityUpdatesStress(logger, options)
+		return
+	case "start-watcher":
+		startChainWatcher(logger, options)
 		return
 	}
 }
 
-// setupRegistryAdmin creates and returns a node registry admin
-func setupRegistryAdmin(
+// setupNodeRegistryAdmin creates and returns a node registry admin
+func setupNodeRegistryAdmin(
+	ctx context.Context,
+	logger *zap.Logger,
+	privateKey string,
+	options *CLI,
+) (blockchain.INodeRegistryAdmin, error) {
+	chainClient, err := blockchain.NewClient(
+		ctx,
+		options.Contracts.SettlementChain.RpcURL,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	signer, err := blockchain.NewPrivateKeySigner(
+		privateKey,
+		options.Contracts.SettlementChain.ChainID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("could not create signer: %w", err)
+	}
+
+	registryAdmin, err := blockchain.NewNodeRegistryAdmin(
+		logger,
+		chainClient,
+		signer,
+		options.Contracts,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("could not create registry admin: %w", err)
+	}
+
+	return registryAdmin, nil
+}
+
+// setupRateRegistryAdmin creates and returns a rate registry admin
+func setupRateRegistryAdmin(
 	ctx context.Context,
 	logger *zap.Logger,
 	privateKey string,
 	chainID int,
 	options *CLI,
-) (blockchain.INodeRegistryAdmin, error) {
-	chainClient, err := blockchain.NewClient(ctx, options.Contracts.RpcUrl)
+) (*blockchain.RatesAdmin, error) {
+	chainClient, err := blockchain.NewClient(
+		ctx,
+		options.Contracts.SettlementChain.RpcURL,
+	)
 	if err != nil {
-		logger.Fatal("could not create chain client", zap.Error(err))
+		return nil, err
 	}
 
 	signer, err := blockchain.NewPrivateKeySigner(
@@ -776,7 +710,7 @@ func setupRegistryAdmin(
 		return nil, fmt.Errorf("could not create signer: %w", err)
 	}
 
-	registryAdmin, err := blockchain.NewNodeRegistryAdmin(
+	registryAdmin, err := blockchain.NewRatesAdmin(
 		logger,
 		chainClient,
 		signer,

@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"testing"
+
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -9,7 +11,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"testing"
 )
 
 func createTestLogger() (*zap.Logger, *observer.ObservedLogs) {
@@ -66,6 +67,7 @@ func TestUnaryLoggingInterceptor(t *testing.T) {
 		"expected log to contain correct error message",
 	)
 }
+
 func TestStreamLoggingInterceptor(t *testing.T) {
 	logger, logs := createTestLogger()
 	interceptor, err := NewLoggingInterceptor(logger)
@@ -81,8 +83,8 @@ func TestStreamLoggingInterceptor(t *testing.T) {
 
 	stream := &mockServerStream{}
 
-	incerceptorStream := interceptor.Stream()
-	err = incerceptorStream(nil, stream, info, handler)
+	interceptorStream := interceptor.Stream()
+	err = interceptorStream(nil, stream, info, handler)
 
 	require.Error(t, err)
 	require.Equal(t, 1, logs.Len(), "expected one log entry but got none")

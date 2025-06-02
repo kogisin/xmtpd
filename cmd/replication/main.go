@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"github.com/Masterminds/semver/v3"
 	"log"
+	"os"
 	"sync"
 	"time"
+
+	"github.com/Masterminds/semver/v3"
 
 	"github.com/jessevdk/go-flags"
 	"github.com/xmtp/xmtpd/pkg/blockchain"
@@ -20,13 +22,12 @@ import (
 	"go.uber.org/zap"
 )
 
-var Version string = "unknown"
+var Version string
 
 var options config.ServerOptions
 
 func main() {
 	_, err := flags.Parse(&options)
-
 	if err != nil {
 		if err, ok := err.(*flags.Error); !ok || err.Type != flags.ErrHelp {
 			fatal("Could not parse options: %s", err)
@@ -34,12 +35,19 @@ func main() {
 		return
 	}
 
+	if Version == "" {
+		Version = os.Getenv("VERSION")
+		if Version == "" {
+			fatal("Could not determine version")
+		}
+	}
+
 	if options.Version {
 		fmt.Printf("Version: %s\n", Version)
 		return
 	}
 
-	err = config.ValidateServerOptions(options)
+	err = config.ValidateServerOptions(&options)
 	if err != nil {
 		fatal("Could not validate options: %s", err)
 	}
@@ -76,7 +84,10 @@ func main() {
 			options.Payer.Enable {
 			namespace := options.DB.NameOverride
 			if namespace == "" {
-				namespace = utils.BuildNamespace(options)
+				namespace = utils.BuildNamespace(
+					options.Signer.PrivateKey,
+					options.Contracts.SettlementChain.NodeRegistryAddress,
+				)
 			}
 			dbInstance, err = db.NewNamespacedDB(
 				ctx,
@@ -86,20 +97,22 @@ func main() {
 				options.DB.WaitForDB,
 				options.DB.ReadTimeout,
 			)
-
 			if err != nil {
 				logger.Fatal("initializing database", zap.Error(err))
 			}
 		}
 
-		ethclient, err := blockchain.NewClient(ctx, options.Contracts.RpcUrl)
+		settlementChainClient, err := blockchain.NewClient(
+			ctx,
+			options.Contracts.SettlementChain.RpcURL,
+		)
 		if err != nil {
 			logger.Fatal("initializing blockchain client", zap.Error(err))
 		}
 
 		chainRegistry, err := registry.NewSmartContractRegistry(
 			ctx,
-			ethclient,
+			settlementChainClient,
 			logger,
 			options.Contracts,
 		)
@@ -118,6 +131,7 @@ func main() {
 			chainRegistry,
 			dbInstance,
 			fmt.Sprintf("0.0.0.0:%d", options.API.Port),
+			fmt.Sprintf("0.0.0.0:%d", options.API.HTTPPort),
 			version,
 		)
 		if err != nil {

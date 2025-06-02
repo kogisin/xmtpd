@@ -2,9 +2,11 @@ package authn
 
 import (
 	"fmt"
-	"github.com/Masterminds/semver/v3"
 	"strconv"
 	"time"
+
+	"github.com/Masterminds/semver/v3"
+	"go.uber.org/zap"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/xmtp/xmtpd/pkg/registry"
@@ -21,16 +23,19 @@ type RegistryVerifier struct {
 	validator ClaimValidator
 }
 
+func emptyClose() {}
+
 /*
 A RegistryVerifier connects to the NodeRegistry and verifies JWTs against the registered public keys
 based on the JWT's subject field
 */
 func NewRegistryVerifier(
+	logger *zap.Logger,
 	registry registry.NodeRegistry,
 	myNodeID uint32,
 	serverVersion *semver.Version,
 ) (*RegistryVerifier, error) {
-	validator, err := NewClaimValidator(serverVersion)
+	validator, err := NewClaimValidator(logger, serverVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +43,7 @@ func NewRegistryVerifier(
 	return &RegistryVerifier{registry: registry, myNodeID: myNodeID, validator: *validator}, nil
 }
 
-func (v *RegistryVerifier) Verify(tokenString string) (uint32, error) {
+func (v *RegistryVerifier) Verify(tokenString string) (uint32, CloseFunc, error) {
 	var token *jwt.Token
 	var err error
 
@@ -47,21 +52,27 @@ func (v *RegistryVerifier) Verify(tokenString string) (uint32, error) {
 		&XmtpdClaims{},
 		v.getMatchingPublicKey,
 	); err != nil {
-		return 0, err
+		return 0, emptyClose, err
 	}
 	if err = v.validateAudience(token); err != nil {
-		return 0, err
+		return 0, emptyClose, err
 	}
 
 	if err = validateExpiry(token); err != nil {
-		return 0, err
+		return 0, emptyClose, err
 	}
 
-	if err = v.validateClaims(token); err != nil {
-		return 0, err
+	closer, err := v.validateClaims(token)
+	if err != nil {
+		return 0, emptyClose, err
 	}
 
-	return getSubjectNodeId(token)
+	nodeId, err := getSubjectNodeId(token)
+	if err != nil {
+		return 0, emptyClose, err
+	}
+
+	return nodeId, closer, nil
 }
 
 func (v *RegistryVerifier) getMatchingPublicKey(token *jwt.Token) (interface{}, error) {
@@ -104,15 +115,15 @@ func (v *RegistryVerifier) validateAudience(token *jwt.Token) error {
 	return fmt.Errorf("could not find node ID in audience %v", audience)
 }
 
-func (v *RegistryVerifier) validateClaims(token *jwt.Token) error {
+func (v *RegistryVerifier) validateClaims(token *jwt.Token) (CloseFunc, error) {
 	claims, ok := token.Claims.(*XmtpdClaims)
 	if !ok {
-		return fmt.Errorf("invalid token claims type")
+		return emptyClose, fmt.Errorf("invalid token claims type")
 	}
 
 	// Check if the token is valid
 	if !token.Valid {
-		return fmt.Errorf("invalid token")
+		return emptyClose, fmt.Errorf("invalid token")
 	}
 
 	return v.validator.ValidateVersionClaimIsCompatible(claims)
@@ -130,7 +141,7 @@ func getSubjectNodeId(token *jwt.Token) (uint32, error) {
 		return 0, err
 	}
 
-	return uint32(nodeId), nil
+	return nodeId, nil
 }
 
 // Validate the issued at and expiration time claims of the JWT

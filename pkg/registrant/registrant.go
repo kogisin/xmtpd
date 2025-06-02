@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/Masterminds/semver/v3"
 
@@ -45,7 +46,6 @@ func NewRegistrant(
 	if err != nil {
 		return nil, err
 	}
-	log.Debug(fmt.Sprintf("Running with public key %x", crypto.FromECDSAPub(record.SigningKey)))
 
 	if err = ensureDatabaseMatches(ctx, db, record); err != nil {
 		return nil, err
@@ -56,6 +56,7 @@ func NewRegistrant(
 	log.Info(
 		"Registrant identified",
 		zap.Uint32("nodeId", record.NodeID),
+		zap.String("publicKey", utils.EcdsaPublicKeyToString(record.SigningKey)),
 	)
 	return &Registrant{
 		record:       record,
@@ -80,6 +81,7 @@ func (r *Registrant) SignStagedEnvelope(
 	stagedEnv queries.StagedOriginatorEnvelope,
 	baseFee currency.PicoDollar,
 	congestionFee currency.PicoDollar,
+	retentionDays uint32,
 ) (*envelopes.OriginatorEnvelope, error) {
 	unsignedEnv := envelopes.UnsignedOriginatorEnvelope{
 		OriginatorNodeId:         r.record.NodeID,
@@ -88,6 +90,7 @@ func (r *Registrant) SignStagedEnvelope(
 		PayerEnvelopeBytes:       stagedEnv.PayerEnvelope,
 		BaseFeePicodollars:       uint64(baseFee),
 		CongestionFeePicodollars: uint64(congestionFee),
+		ExpiryUnixtime:           uint64(time.Now().AddDate(0, 0, int(retentionDays)).Unix()),
 	}
 	unsignedBytes, err := proto.Marshal(&unsignedEnv)
 	if err != nil {

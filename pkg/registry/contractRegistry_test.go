@@ -3,7 +3,6 @@ package registry_test
 import (
 	"context"
 	"encoding/hex"
-	"math/big"
 	"math/rand"
 	"testing"
 	"time"
@@ -11,7 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"github.com/xmtp/xmtpd/contracts/pkg/nodes"
+	"github.com/xmtp/xmtpd/pkg/abi/noderegistry"
 	"github.com/xmtp/xmtpd/pkg/config"
 	mocks "github.com/xmtp/xmtpd/pkg/mocks/registry"
 	r "github.com/xmtp/xmtpd/pkg/registry"
@@ -37,35 +36,35 @@ func TestContractRegistryNewNodes(t *testing.T) {
 	registry, err := r.NewSmartContractRegistry(context.Background(),
 		nil,
 		testutils.NewLog(t),
-		config.ContractsOptions{RegistryRefreshInterval: 100 * time.Millisecond},
+		config.ContractsOptions{
+			SettlementChain: config.SettlementChainOptions{
+				NodeRegistryRefreshInterval: 100 * time.Millisecond,
+			},
+		},
 	)
 	require.NoError(t, err)
 
 	enc, err := hex.DecodeString(TEST_PUBKEY)
 	require.NoError(t, err)
 
-	mockContract := mocks.NewMockNodesContract(t)
+	mockContract := mocks.NewMockNodeRegistryContract(t)
 	mockContract.EXPECT().
 		GetAllNodes(mock.Anything).
-		Return([]nodes.INodesNodeWithId{
+		Return([]noderegistry.INodeRegistryNodeWithId{
 			{
-				NodeId: big.NewInt(1),
-				Node: nodes.INodesNode{
-					HttpAddress:          "http://foo.com",
-					SigningKeyPub:        enc,
-					IsDisabled:           false,
-					IsApiEnabled:         true,
-					IsReplicationEnabled: true,
+				NodeId: 1,
+				Node: noderegistry.INodeRegistryNode{
+					HttpAddress:      "http://foo.com",
+					SigningPublicKey: enc,
+					IsCanonical:      true,
 				},
 			},
 			{
-				NodeId: big.NewInt(2),
-				Node: nodes.INodesNode{
-					HttpAddress:          "https://bar.com",
-					SigningKeyPub:        enc,
-					IsDisabled:           false,
-					IsApiEnabled:         true,
-					IsReplicationEnabled: true,
+				NodeId: 2,
+				Node: noderegistry.INodeRegistryNode{
+					HttpAddress:      "https://bar.com",
+					SigningPublicKey: enc,
+					IsCanonical:      true,
 				},
 			},
 		}, nil)
@@ -88,11 +87,15 @@ func TestContractRegistryChangedNodes(t *testing.T) {
 	registry, err := r.NewSmartContractRegistry(context.Background(),
 		nil,
 		testutils.NewLog(t),
-		config.ContractsOptions{RegistryRefreshInterval: 10 * time.Millisecond},
+		config.ContractsOptions{
+			SettlementChain: config.SettlementChainOptions{
+				NodeRegistryRefreshInterval: 10 * time.Millisecond,
+			},
+		},
 	)
 	require.NoError(t, err)
 
-	mockContract := mocks.NewMockNodesContract(t)
+	mockContract := mocks.NewMockNodeRegistryContract(t)
 
 	enc, err := hex.DecodeString(TEST_PUBKEY)
 	require.NoError(t, err)
@@ -102,22 +105,20 @@ func TestContractRegistryChangedNodes(t *testing.T) {
 	// Subsequent calls will set the address to bar.com
 	mockContract.EXPECT().
 		GetAllNodes(mock.Anything).
-		RunAndReturn(func(*bind.CallOpts) ([]nodes.INodesNodeWithId, error) {
+		RunAndReturn(func(*bind.CallOpts) ([]noderegistry.INodeRegistryNodeWithId, error) {
 			httpAddress := "http://foo.com"
 			if !hasSentInitialValues {
 				hasSentInitialValues = true
 			} else {
 				httpAddress = "http://bar.com"
 			}
-			return []nodes.INodesNodeWithId{
+			return []noderegistry.INodeRegistryNodeWithId{
 				{
-					NodeId: big.NewInt(1),
-					Node: nodes.INodesNode{
-						HttpAddress:          httpAddress,
-						SigningKeyPub:        enc,
-						IsDisabled:           false,
-						IsApiEnabled:         true,
-						IsReplicationEnabled: true,
+					NodeId: 1,
+					Node: noderegistry.INodeRegistryNode{
+						HttpAddress:      httpAddress,
+						SigningPublicKey: enc,
+						IsCanonical:      true,
 					},
 				},
 			}, nil
@@ -147,26 +148,28 @@ func TestStopOnContextCancel(t *testing.T) {
 	registry, err := r.NewSmartContractRegistry(context.Background(),
 		nil,
 		testutils.NewLog(t),
-		config.ContractsOptions{RegistryRefreshInterval: 10 * time.Millisecond},
+		config.ContractsOptions{
+			SettlementChain: config.SettlementChainOptions{
+				NodeRegistryRefreshInterval: 10 * time.Millisecond,
+			},
+		},
 	)
 	require.NoError(t, err)
 
 	enc, err := hex.DecodeString(TEST_PUBKEY)
 	require.NoError(t, err)
 
-	mockContract := mocks.NewMockNodesContract(t)
+	mockContract := mocks.NewMockNodeRegistryContract(t)
 	mockContract.EXPECT().
 		GetAllNodes(mock.Anything).
-		RunAndReturn(func(*bind.CallOpts) ([]nodes.INodesNodeWithId, error) {
-			return []nodes.INodesNodeWithId{
+		RunAndReturn(func(*bind.CallOpts) ([]noderegistry.INodeRegistryNodeWithId, error) {
+			return []noderegistry.INodeRegistryNodeWithId{
 				{
-					NodeId: big.NewInt(rand.Int63n(1000)),
-					Node: nodes.INodesNode{
-						HttpAddress:          "http://foo.com",
-						SigningKeyPub:        enc,
-						IsDisabled:           false,
-						IsApiEnabled:         true,
-						IsReplicationEnabled: true,
+					NodeId: uint32(rand.Int31n(1000)),
+					Node: noderegistry.INodeRegistryNode{
+						HttpAddress:      "http://foo.com",
+						SigningPublicKey: enc,
+						IsCanonical:      true,
 					},
 				},
 			}, nil

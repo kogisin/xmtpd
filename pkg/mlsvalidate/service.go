@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
+
 	"github.com/xmtp/xmtpd/pkg/config"
 	"github.com/xmtp/xmtpd/pkg/db/queries"
 	"github.com/xmtp/xmtpd/pkg/envelopes"
@@ -24,15 +26,16 @@ func NewMlsValidationService(
 	ctx context.Context,
 	log *zap.Logger,
 	cfg config.MlsValidationOptions,
+	clientMetrics *grpcprom.ClientMetrics,
 ) (*MLSValidationServiceImpl, error) {
 	target, isTLS, err := utils.HttpAddressToGrpcTarget(cfg.GrpcAddress)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to convert HTTP address to gRPC target: %v", err)
+		return nil, fmt.Errorf("failed to convert HTTP address to gRPC target: %v", err)
 	}
 
 	creds, err := utils.GetCredentialsForAddress(isTLS)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to get credentials: %v", err)
+		return nil, fmt.Errorf("failed to get credentials: %v", err)
 	}
 
 	log.Info(
@@ -43,6 +46,8 @@ func NewMlsValidationService(
 	conn, err := grpc.NewClient(
 		target,
 		grpc.WithTransportCredentials(creds),
+		grpc.WithUnaryInterceptor(clientMetrics.UnaryClientInterceptor()),
+		grpc.WithStreamInterceptor(clientMetrics.StreamClientInterceptor()),
 	)
 	if err != nil {
 		return nil, err
@@ -50,7 +55,7 @@ func NewMlsValidationService(
 
 	go func() {
 		<-ctx.Done()
-		conn.Close()
+		_ = conn.Close()
 	}()
 
 	return &MLSValidationServiceImpl{

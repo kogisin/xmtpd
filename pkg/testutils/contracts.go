@@ -3,44 +3,41 @@ package testutils
 import (
 	"math/big"
 	"testing"
-	"time"
 
-	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/stretchr/testify/require"
-	"github.com/xmtp/xmtpd/contracts/pkg/groupmessages"
-	"github.com/xmtp/xmtpd/contracts/pkg/identityupdates"
-	"github.com/xmtp/xmtpd/contracts/pkg/nodes"
-	"github.com/xmtp/xmtpd/contracts/pkg/ratesmanager"
+	gm "github.com/xmtp/xmtpd/pkg/abi/groupmessagebroadcaster"
+	iu "github.com/xmtp/xmtpd/pkg/abi/identityupdatebroadcaster"
 	envelopesProto "github.com/xmtp/xmtpd/pkg/proto/xmtpv4/envelopes"
 	"github.com/xmtp/xmtpd/pkg/utils"
 	"google.golang.org/protobuf/proto"
 )
 
 const (
-	ANVIL_LOCALNET_HOST            = "http://localhost:7545"
-	ANVIL_LOCALNET_CHAIN_ID        = 31337
-	LOCAL_PRIVATE_KEY              = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-	NODES_CONTRACT_NAME            = "Nodes"
-	GROUP_MESSAGES_CONTRACT_NAME   = "GroupMessages"
-	IDENTITY_UPDATES_CONTRACT_NAME = "IdentityUpdates"
-	RATES_MANAGER_CONTRACT_NAME    = "RatesManager"
+	LOCAL_PRIVATE_KEY = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 )
 
 // Build an abi encoded MessageSent event struct
 func BuildMessageSentEvent(
-	groupID [32]byte,
 	message []byte,
-	sequenceID uint64,
 ) ([]byte, error) {
-	abi, err := groupmessages.GroupMessagesMetaData.GetAbi()
+	gmabi, err := gm.GroupMessageBroadcasterMetaData.GetAbi()
 	if err != nil {
 		return nil, err
 	}
-	return abi.Events["MessageSent"].Inputs.Pack(groupID, message, sequenceID)
+
+	inputs := gmabi.Events["MessageSent"].Inputs
+	var nonIndexed abi.Arguments
+	for _, input := range inputs {
+		if !input.Indexed {
+			nonIndexed = append(nonIndexed, input)
+		}
+	}
+
+	return nonIndexed.Pack(message)
 }
 
 // Build a log message for a MessageSent event
@@ -52,27 +49,44 @@ func BuildMessageSentLog(
 ) types.Log {
 	messageBytes, err := proto.Marshal(clientEnvelope)
 	require.NoError(t, err)
-	eventData, err := BuildMessageSentEvent(groupID, messageBytes, sequenceID)
+	eventData, err := BuildMessageSentEvent(messageBytes)
 	require.NoError(t, err)
 
-	abi, err := groupmessages.GroupMessagesMetaData.GetAbi()
+	gmabi, err := gm.GroupMessageBroadcasterMetaData.GetAbi()
 	require.NoError(t, err)
 
-	topic, err := utils.GetEventTopic(abi, "MessageSent")
+	topic0, err := utils.GetEventTopic(gmabi, "MessageSent")
 	require.NoError(t, err)
 
+	topic1 := common.BytesToHash(groupID[:])                       // indexed bytes32 groupId
+	topic2 := common.BigToHash(new(big.Int).SetUint64(sequenceID)) // indexed uint64 sequenceId
+
+	// Step 6: Assemble the log
 	return types.Log{
-		Topics: []common.Hash{topic},
-		Data:   eventData,
+		Topics: []common.Hash{
+			topic0, // event signature
+			topic1, // groupId
+			topic2, // sequenceId
+		},
+		Data: eventData, // ABI-encoded `message` (non-indexed)
 	}
 }
 
-func BuildIdentityUpdateEvent(inboxId [32]byte, update []byte, sequenceID uint64) ([]byte, error) {
-	abi, err := identityupdates.IdentityUpdatesMetaData.GetAbi()
+func BuildIdentityUpdateEvent(update []byte) ([]byte, error) {
+	iuabi, err := iu.IdentityUpdateBroadcasterMetaData.GetAbi()
 	if err != nil {
 		return nil, err
 	}
-	return abi.Events["IdentityUpdateCreated"].Inputs.Pack(inboxId, update, sequenceID)
+
+	inputs := iuabi.Events["IdentityUpdateCreated"].Inputs
+	var nonIndexed abi.Arguments
+	for _, input := range inputs {
+		if !input.Indexed {
+			nonIndexed = append(nonIndexed, input)
+		}
+	}
+
+	return nonIndexed.Pack(update)
 }
 
 // Build a log message for an IdentityUpdateCreated event
@@ -84,100 +98,25 @@ func BuildIdentityUpdateLog(
 ) types.Log {
 	messageBytes, err := proto.Marshal(clientEnvelope)
 	require.NoError(t, err)
-	eventData, err := BuildIdentityUpdateEvent(inboxId, messageBytes, sequenceID)
+	eventData, err := BuildIdentityUpdateEvent(messageBytes)
 	require.NoError(t, err)
 
-	abi, err := identityupdates.IdentityUpdatesMetaData.GetAbi()
+	iuabi, err := iu.IdentityUpdateBroadcasterMetaData.GetAbi()
 	require.NoError(t, err)
 
-	topic, err := utils.GetEventTopic(abi, "IdentityUpdateCreated")
+	topic0, err := utils.GetEventTopic(iuabi, "IdentityUpdateCreated")
 	require.NoError(t, err)
 
+	topic1 := common.BytesToHash(inboxId[:])                       // indexed bytes32 inboxId
+	topic2 := common.BigToHash(new(big.Int).SetUint64(sequenceID)) // indexed uint64 sequenceId
+
+	// Step 6: Assemble the log
 	return types.Log{
-		Topics: []common.Hash{topic},
-		Data:   eventData,
+		Topics: []common.Hash{
+			topic0, // event signature
+			topic1, // groupId
+			topic2, // sequenceId
+		},
+		Data: eventData, // ABI-encoded `message` (non-indexed)
 	}
-}
-
-/*
-*
-Deploy a contract and return the contract's address. Will return a different address for each run, making it suitable for testing
-*
-*/
-func deployContract(t *testing.T, contractName string) string {
-	retryMax := 10
-	var retry = 0
-	var err error
-
-	var addr common.Address
-
-	for retry < retryMax {
-		if err != nil {
-			retry++
-			t.Logf("Error deploying contract, retrying: %v. Attempt (%d/%d)", err, retry, retryMax)
-			time.Sleep(10 * time.Millisecond)
-		}
-
-		var client *ethclient.Client
-		client, err = ethclient.Dial(ANVIL_LOCALNET_HOST)
-		if err != nil {
-			continue
-		}
-
-		privateKey, err := crypto.HexToECDSA(LOCAL_PRIVATE_KEY)
-		if err != nil {
-			continue
-		}
-
-		auth, err := bind.NewKeyedTransactorWithChainID(
-			privateKey,
-			big.NewInt(ANVIL_LOCALNET_CHAIN_ID),
-		)
-		if err != nil {
-			continue
-		}
-
-		switch contractName {
-		case NODES_CONTRACT_NAME:
-			addr, _, _, err = nodes.DeployNodes(auth, client, auth.From)
-		case GROUP_MESSAGES_CONTRACT_NAME:
-			addr, _, _, err = groupmessages.DeployGroupMessages(auth, client)
-		case IDENTITY_UPDATES_CONTRACT_NAME:
-			addr, _, _, err = identityupdates.DeployIdentityUpdates(auth, client)
-		case RATES_MANAGER_CONTRACT_NAME:
-			addr, _, _, err = ratesmanager.DeployRatesManager(auth, client)
-			require.NoError(t, err)
-			var contract *ratesmanager.RatesManager
-			contract, err = ratesmanager.NewRatesManager(addr, client)
-			require.NoError(t, err)
-			_, err = contract.Initialize(auth, auth.From)
-		default:
-			t.Fatalf("Unknown contract name: %s", contractName)
-		}
-
-		if err != nil {
-			continue
-		}
-
-		break
-	}
-
-	return addr.String()
-
-}
-
-func DeployNodesContract(t *testing.T) string {
-	return deployContract(t, NODES_CONTRACT_NAME)
-}
-
-func DeployGroupMessagesContract(t *testing.T) string {
-	return deployContract(t, GROUP_MESSAGES_CONTRACT_NAME)
-}
-
-func DeployIdentityUpdatesContract(t *testing.T) string {
-	return deployContract(t, IDENTITY_UPDATES_CONTRACT_NAME)
-}
-
-func DeployRatesManagerContract(t *testing.T) string {
-	return deployContract(t, RATES_MANAGER_CONTRACT_NAME)
 }

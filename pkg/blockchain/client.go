@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xmtp/xmtpd/pkg/metrics"
+
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -16,7 +18,7 @@ func NewClient(ctx context.Context, rpcUrl string) (*ethclient.Client, error) {
 	return ethclient.DialContext(ctx, rpcUrl)
 }
 
-// executeTransaction is a helper function that:
+// ExecuteTransaction is a helper function that:
 // - executes a transaction
 // - waits for it to be mined
 // - processes the event logs
@@ -82,6 +84,11 @@ func WaitForTransaction(
 	// Ticker to track polling interval
 	ticker := time.NewTicker(pollSleep)
 	defer ticker.Stop()
+
+	now := time.Now()
+	defer func() {
+		metrics.EmitBlockchainWaitForTransaction(time.Since(now).Seconds())
+	}()
 
 	for {
 		receipt, err := client.TransactionReceipt(ctx, hash)

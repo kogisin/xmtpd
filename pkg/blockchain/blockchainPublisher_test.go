@@ -2,30 +2,34 @@ package blockchain_test
 
 import (
 	"context"
-	"github.com/xmtp/xmtpd/pkg/blockchain"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/xmtp/xmtpd/pkg/blockchain"
 	"github.com/xmtp/xmtpd/pkg/testutils"
+	"github.com/xmtp/xmtpd/pkg/testutils/anvil"
 )
 
-func buildPublisher(t *testing.T) (*blockchain.BlockchainPublisher, func()) {
+func buildPublisher(t *testing.T) *blockchain.BlockchainPublisher {
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	logger := testutils.NewLog(t)
-	contractsOptions := testutils.GetContractsOptions(t)
-	// Set the nodes contract address to a random smart contract instead of the fixed deployment
-	contractsOptions.NodesContractAddress = testutils.DeployNodesContract(t)
+	rpcUrl := anvil.StartAnvil(t, false)
+	contractsOptions := testutils.NewContractsOptions(t, rpcUrl)
 
 	signer, err := blockchain.NewPrivateKeySigner(
 		testutils.GetPayerOptions(t).PrivateKey,
-		contractsOptions.ChainID,
+		contractsOptions.AppChain.ChainID,
 	)
 	require.NoError(t, err)
 
-	client, err := blockchain.NewClient(ctx, contractsOptions.RpcUrl)
+	client, err := blockchain.NewClient(ctx, contractsOptions.SettlementChain.RpcURL)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		client.Close()
+	})
 
 	nonceManager := NewTestNonceManager(logger)
 
@@ -39,15 +43,12 @@ func buildPublisher(t *testing.T) (*blockchain.BlockchainPublisher, func()) {
 	)
 	require.NoError(t, err)
 
-	return publisher, func() {
-		cancel()
-		client.Close()
-	}
+	return publisher
 }
 
 func TestPublishIdentityUpdate(t *testing.T) {
-	publisher, cleanup := buildPublisher(t)
-	defer cleanup()
+	publisher := buildPublisher(t)
+
 	tests := []struct {
 		name           string
 		inboxId        [32]byte
@@ -56,11 +57,11 @@ func TestPublishIdentityUpdate(t *testing.T) {
 		wantErr        bool
 	}{
 		{
-			name:           "happy path",
+			name:           "cancelled context",
 			inboxId:        testutils.RandomGroupID(),
-			identityUpdate: testutils.RandomBytes(104),
-			ctx:            context.Background(),
-			wantErr:        false,
+			identityUpdate: testutils.RandomBytes(100),
+			ctx:            testutils.CancelledContext(),
+			wantErr:        true,
 		},
 		{
 			name:           "empty update",
@@ -70,11 +71,11 @@ func TestPublishIdentityUpdate(t *testing.T) {
 			wantErr:        true,
 		},
 		{
-			name:           "cancelled context",
+			name:           "happy path",
 			inboxId:        testutils.RandomGroupID(),
-			identityUpdate: testutils.RandomBytes(100),
-			ctx:            testutils.CancelledContext(),
-			wantErr:        true,
+			identityUpdate: testutils.RandomBytes(104),
+			ctx:            context.Background(),
+			wantErr:        false,
 		},
 	}
 	for _, tt := range tests {
@@ -101,8 +102,7 @@ func TestPublishIdentityUpdate(t *testing.T) {
 }
 
 func TestPublishGroupMessage(t *testing.T) {
-	publisher, cleanup := buildPublisher(t)
-	defer cleanup()
+	publisher := buildPublisher(t)
 
 	tests := []struct {
 		name    string
@@ -154,8 +154,7 @@ func TestPublishGroupMessage(t *testing.T) {
 }
 
 func TestPublishGroupMessageConcurrent(t *testing.T) {
-	publisher, cleanup := buildPublisher(t)
-	defer cleanup()
+	publisher := buildPublisher(t)
 
 	const parallelRuns = 100
 	var wg sync.WaitGroup

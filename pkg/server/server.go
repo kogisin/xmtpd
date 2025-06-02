@@ -15,6 +15,8 @@ import (
 	"github.com/xmtp/xmtpd/pkg/proto/xmtpv4/metadata_api"
 
 	"github.com/Masterminds/semver/v3"
+	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
+	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"go.uber.org/zap"
@@ -62,15 +64,22 @@ func NewReplicationServer(
 	nodeRegistry registry.NodeRegistry,
 	writerDB *sql.DB,
 	listenAddress string,
+	httpListenAddress string,
 	serverVersion *semver.Version,
 ) (*ReplicationServer, error) {
 	var err error
 
+	promReg := prometheus.NewRegistry()
+
+	clientMetrics := grpcprom.NewClientMetrics(
+		grpcprom.WithClientHandlingTimeHistogram(),
+	)
+
 	var mtcs *metrics.Server
 	if options.Metrics.Enable {
-		promReg := prometheus.NewRegistry()
 		promReg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 		promReg.MustRegister(collectors.NewGoCollector())
+		promReg.MustRegister(clientMetrics)
 
 		mtcs, err = metrics.NewMetricsServer(ctx,
 			options.Metrics.Address,
@@ -107,26 +116,25 @@ func NewReplicationServer(
 		}
 	}
 
-	if options.Indexer.Enable {
+	if options.Indexer.Enable || options.Replication.Enable {
 		s.validationService, err = mlsvalidate.NewMlsValidationService(
 			ctx,
 			log,
 			options.MlsValidation,
+			clientMetrics,
 		)
 		if err != nil {
 			return nil, err
 		}
+	}
 
-		s.indx = indexer.NewIndexer(ctx, log)
-		err = s.indx.StartIndexer(
-			writerDB,
-			options.Contracts,
-			s.validationService,
-		)
-
+	if options.Indexer.Enable {
+		s.indx, err = indexer.NewIndexer(ctx, log, writerDB, options.Contracts, s.validationService)
 		if err != nil {
 			return nil, err
 		}
+
+		s.indx.StartIndexer()
 
 		log.Info("Indexer service enabled")
 	}
@@ -139,7 +147,10 @@ func NewReplicationServer(
 			s,
 			writerDB,
 			listenAddress,
+			httpListenAddress,
 			serverVersion,
+			promReg,
+			clientMetrics,
 		)
 		if err != nil {
 			return nil, err
@@ -174,22 +185,16 @@ func startAPIServer(
 	s *ReplicationServer,
 	writerDB *sql.DB,
 	listenAddress string,
+	httpListenAddress string,
 	serverVersion *semver.Version,
+	registry *prometheus.Registry,
+	clientMetrics *grpcprom.ClientMetrics,
 ) error {
 	var err error
 
 	serviceRegistrationFunc := func(grpcServer *grpc.Server) error {
 		if options.Replication.Enable {
-			if s.validationService == nil {
-				s.validationService, err = mlsvalidate.NewMlsValidationService(
-					ctx,
-					logger,
-					options.MlsValidation,
-				)
-				if err != nil {
-					return err
-				}
-			}
+
 			s.cursorUpdater = metadata.NewCursorUpdater(ctx, logger, writerDB)
 
 			replicationService, err := message.NewReplicationApiService(
@@ -200,6 +205,7 @@ func startAPIServer(
 				s.validationService,
 				s.cursorUpdater,
 				getRatesFetcher(),
+				options.Replication,
 			)
 			if err != nil {
 				return err
@@ -229,13 +235,13 @@ func startAPIServer(
 
 			signer, err := blockchain.NewPrivateKeySigner(
 				options.Payer.PrivateKey,
-				options.Contracts.ChainID,
+				options.Contracts.AppChain.ChainID,
 			)
 			if err != nil {
 				logger.Fatal("initializing signer", zap.Error(err))
 			}
 
-			ethclient, err := blockchain.NewClient(ctx, options.Contracts.RpcUrl)
+			appChainClient, err := blockchain.NewClient(ctx, options.Contracts.AppChain.RpcURL)
 			if err != nil {
 				logger.Fatal("initializing blockchain client", zap.Error(err))
 			}
@@ -245,7 +251,7 @@ func startAPIServer(
 			blockchainPublisher, err := blockchain.NewBlockchainPublisher(
 				ctx,
 				logger,
-				ethclient,
+				appChainClient,
 				signer,
 				options.Contracts,
 				nonceManager,
@@ -261,6 +267,7 @@ func startAPIServer(
 				payerPrivateKey,
 				blockchainPublisher,
 				nil,
+				clientMetrics,
 			)
 			if err != nil {
 				return err
@@ -273,10 +280,33 @@ func startAPIServer(
 		return nil
 	}
 
+	httpRegistrationFunc := func(gwmux *runtime.ServeMux, conn *grpc.ClientConn) error {
+		if options.Replication.Enable {
+			err = metadata_api.RegisterMetadataApiHandler(ctx, gwmux, conn)
+			if err != nil {
+				return err
+			}
+
+			err = message_api.RegisterReplicationApiHandler(ctx, gwmux, conn)
+			if err != nil {
+				return err
+			}
+		}
+
+		if options.Payer.Enable {
+			err = payer_api.RegisterPayerApiHandler(ctx, gwmux, conn)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
 	var jwtVerifier authn.JWTVerifier
 
 	if s.nodeRegistry != nil && s.registrant != nil {
 		jwtVerifier, err = authn.NewRegistryVerifier(
+			logger,
 			s.nodeRegistry,
 			s.registrant.NodeID(),
 			serverVersion,
@@ -290,9 +320,12 @@ func startAPIServer(
 		s.ctx,
 		logger,
 		listenAddress,
+		httpListenAddress,
 		options.Reflection.Enable,
 		serviceRegistrationFunc,
+		httpRegistrationFunc,
 		jwtVerifier,
+		registry,
 	)
 	if err != nil {
 		return err

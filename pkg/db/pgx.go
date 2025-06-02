@@ -5,9 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"go.uber.org/zap"
 	"regexp"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -128,7 +129,8 @@ func NewNamespacedDB(
 	logger *zap.Logger,
 	dsn string,
 	namespace string,
-	waitForDB time.Duration, statementTimeout time.Duration,
+	waitForDB time.Duration,
+	statementTimeout time.Duration,
 ) (*sql.DB, error) {
 	// Parse the DSN to get the config
 	config, err := parseConfig(dsn, statementTimeout)
@@ -153,6 +155,34 @@ func NewNamespacedDB(
 	if err != nil {
 		return nil, err
 	}
+
+	return db, nil
+}
+
+// ConnectToDB establishes a connection to an existing database using the provided DSN.
+// Unlike NewNamespacedDB, this function does not create the database or run migrations.
+// If namespace is provided, it overrides the database name in the DSN.
+func ConnectToDB(
+	ctx context.Context,
+	logger *zap.Logger,
+	dsn string,
+	namespace string,
+	waitForDB time.Duration,
+	statementTimeout time.Duration,
+) (*sql.DB, error) {
+	config, err := parseConfig(dsn, statementTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse DSN: %w", err)
+	}
+
+	config.ConnConfig.Database = namespace
+
+	db, err := newPGXDB(ctx, config, waitForDB)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Info("Successfully connected to DB", zap.String("database", config.ConnConfig.Database))
 
 	return db, nil
 }

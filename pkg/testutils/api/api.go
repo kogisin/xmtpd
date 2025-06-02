@@ -5,8 +5,13 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/xmtp/xmtpd/pkg/config"
 
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/stretchr/testify/require"
 	"github.com/xmtp/xmtpd/pkg/api"
 	"github.com/xmtp/xmtpd/pkg/api/message"
@@ -15,6 +20,7 @@ import (
 	"github.com/xmtp/xmtpd/pkg/authn"
 	"github.com/xmtp/xmtpd/pkg/db/queries"
 	"github.com/xmtp/xmtpd/pkg/mocks/blockchain"
+
 	mlsvalidateMocks "github.com/xmtp/xmtpd/pkg/mocks/mlsvalidate"
 	mocks "github.com/xmtp/xmtpd/pkg/mocks/registry"
 	"github.com/xmtp/xmtpd/pkg/proto/xmtpv4/message_api"
@@ -31,9 +37,8 @@ import (
 
 func NewReplicationAPIClient(
 	t *testing.T,
-	ctx context.Context,
 	addr string,
-) (message_api.ReplicationApiClient, func()) {
+) message_api.ReplicationApiClient {
 	// https://github.com/grpc/grpc/blob/master/doc/naming.md
 	dialAddr := fmt.Sprintf("passthrough://localhost/%s", addr)
 	conn, err := grpc.NewClient(
@@ -43,17 +48,16 @@ func NewReplicationAPIClient(
 	)
 	require.NoError(t, err)
 	client := message_api.NewReplicationApiClient(conn)
-	return client, func() {
-		err := conn.Close()
-		require.NoError(t, err)
-	}
+	t.Cleanup(func() {
+		require.NoError(t, conn.Close())
+	})
+	return client
 }
 
 func NewPayerAPIClient(
 	t *testing.T,
-	ctx context.Context,
 	addr string,
-) (payer_api.PayerApiClient, func()) {
+) payer_api.PayerApiClient {
 	dialAddr := fmt.Sprintf("passthrough://localhost/%s", addr)
 	conn, err := grpc.NewClient(
 		dialAddr,
@@ -62,17 +66,16 @@ func NewPayerAPIClient(
 	)
 	require.NoError(t, err)
 	client := payer_api.NewPayerApiClient(conn)
-	return client, func() {
-		err := conn.Close()
-		require.NoError(t, err)
-	}
+	t.Cleanup(func() {
+		require.NoError(t, conn.Close())
+	})
+	return client
 }
 
 func NewMetadataAPIClient(
 	t *testing.T,
-	ctx context.Context,
 	addr string,
-) (metadata_api.MetadataApiClient, func()) {
+) metadata_api.MetadataApiClient {
 	dialAddr := fmt.Sprintf("passthrough://localhost/%s", addr)
 	conn, err := grpc.NewClient(
 		dialAddr,
@@ -81,10 +84,10 @@ func NewMetadataAPIClient(
 	)
 	require.NoError(t, err)
 	client := metadata_api.NewMetadataApiClient(conn)
-	return client, func() {
-		err := conn.Close()
-		require.NoError(t, err)
-	}
+	t.Cleanup(func() {
+		require.NoError(t, conn.Close())
+	})
+	return client
 }
 
 type ApiServerMocks struct {
@@ -93,10 +96,10 @@ type ApiServerMocks struct {
 	MockMessagePublisher  *blockchain.MockIBlockchainPublisher
 }
 
-func NewTestAPIServer(t *testing.T) (*api.ApiServer, *sql.DB, ApiServerMocks, func()) {
+func NewTestAPIServer(t *testing.T) (*api.ApiServer, *sql.DB, ApiServerMocks) {
 	ctx, cancel := context.WithCancel(context.Background())
 	log := testutils.NewLog(t)
-	db, _, dbCleanup := testutils.NewDB(t, ctx)
+	db, _ := testutils.NewDB(t, ctx)
 	privKey, err := crypto.GenerateKey()
 	require.NoError(t, err)
 	privKeyStr := "0x" + utils.HexEncode(crypto.FromECDSA(privKey))
@@ -117,6 +120,7 @@ func NewTestAPIServer(t *testing.T) (*api.ApiServer, *sql.DB, ApiServerMocks, fu
 	mockValidationService := mlsvalidateMocks.NewMockMLSValidationService(t)
 
 	jwtVerifier, err := authn.NewRegistryVerifier(
+		log,
 		mockRegistry,
 		registrant.NodeID(),
 		testutils.GetLatestVersion(t),
@@ -134,6 +138,9 @@ func NewTestAPIServer(t *testing.T) (*api.ApiServer, *sql.DB, ApiServerMocks, fu
 			mockValidationService,
 			metadata.NewCursorUpdater(ctx, log, db),
 			ratesFetcher,
+			config.ReplicationOptions{
+				SendKeepAliveInterval: 30 * time.Second,
+			},
 		)
 		require.NoError(t, err)
 		message_api.RegisterReplicationApiServer(grpcServer, replicationService)
@@ -144,6 +151,7 @@ func NewTestAPIServer(t *testing.T) (*api.ApiServer, *sql.DB, ApiServerMocks, fu
 			mockRegistry,
 			privKey,
 			mockMessagePublisher,
+			nil,
 			nil,
 		)
 		require.NoError(t, err)
@@ -160,13 +168,30 @@ func NewTestAPIServer(t *testing.T) (*api.ApiServer, *sql.DB, ApiServerMocks, fu
 		return nil
 	}
 
+	httpRegistrationFunc := func(gwmux *runtime.ServeMux, conn *grpc.ClientConn) error {
+		var err error
+		err = metadata_api.RegisterMetadataApiHandler(ctx, gwmux, conn)
+		require.NoError(t, err)
+
+		err = message_api.RegisterReplicationApiHandler(ctx, gwmux, conn)
+		require.NoError(t, err)
+
+		err = payer_api.RegisterPayerApiHandler(ctx, gwmux, conn)
+		require.NoError(t, err)
+
+		return nil
+	}
+
 	svr, err := api.NewAPIServer(
 		ctx,
 		log,
 		"localhost:0", /*listenAddress*/
-		true,          /*enableReflection*/
+		"localhost:0",
+		true, /*enableReflection*/
 		serviceRegistrationFunc,
+		httpRegistrationFunc,
 		jwtVerifier,
+		prometheus.NewRegistry(),
 	)
 	require.NoError(t, err)
 
@@ -176,31 +201,26 @@ func NewTestAPIServer(t *testing.T) (*api.ApiServer, *sql.DB, ApiServerMocks, fu
 		MockMessagePublisher:  mockMessagePublisher,
 	}
 
-	return svr, db, allMocks, func() {
+	t.Cleanup(func() {
 		cancel()
 		svr.Close(0)
-		dbCleanup()
-	}
+	})
+
+	return svr, db, allMocks
 }
 
 func NewTestReplicationAPIClient(
 	t *testing.T,
-) (message_api.ReplicationApiClient, *sql.DB, ApiServerMocks, func()) {
-	svc, db, allMocks, svcCleanup := NewTestAPIServer(t)
-	client, clientCleanup := NewReplicationAPIClient(t, context.Background(), svc.Addr().String())
-	return client, db, allMocks, func() {
-		clientCleanup()
-		svcCleanup()
-	}
+) (message_api.ReplicationApiClient, *sql.DB, ApiServerMocks) {
+	svc, db, allMocks := NewTestAPIServer(t)
+	client := NewReplicationAPIClient(t, svc.Addr().String())
+	return client, db, allMocks
 }
 
 func NewTestMetadataAPIClient(
 	t *testing.T,
-) (metadata_api.MetadataApiClient, *sql.DB, ApiServerMocks, func()) {
-	svc, db, allMocks, svcCleanup := NewTestAPIServer(t)
-	client, clientCleanup := NewMetadataAPIClient(t, context.Background(), svc.Addr().String())
-	return client, db, allMocks, func() {
-		clientCleanup()
-		svcCleanup()
-	}
+) (metadata_api.MetadataApiClient, *sql.DB, ApiServerMocks) {
+	svc, db, allMocks := NewTestAPIServer(t)
+	client := NewMetadataAPIClient(t, svc.Addr().String())
+	return client, db, allMocks
 }

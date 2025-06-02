@@ -1,12 +1,13 @@
 package authn_test
 
 import (
+	"testing"
+
 	"github.com/Masterminds/semver/v3"
 	"github.com/stretchr/testify/require"
 	"github.com/xmtp/xmtpd/pkg/authn"
 	"github.com/xmtp/xmtpd/pkg/registry"
 	"github.com/xmtp/xmtpd/pkg/testutils"
-	"testing"
 )
 
 func newVersionNoError(t *testing.T, version string, pre string, meta string) semver.Version {
@@ -53,7 +54,8 @@ func TestClaimsNoVersion(t *testing.T) {
 
 			token, err := tokenFactory.CreateToken(uint32(VERIFIER_NODE_ID))
 			require.NoError(t, err)
-			_, verificationError := verifier.Verify(token.SignedString)
+			_, cancel, verificationError := verifier.Verify(token.SignedString)
+			defer cancel()
 			if tt.wantErr {
 				require.Error(t, verificationError)
 			} else {
@@ -115,7 +117,8 @@ func TestClaimsVariousVersions(t *testing.T) {
 
 			token, err := tokenFactory.CreateToken(uint32(VERIFIER_NODE_ID))
 			require.NoError(t, err)
-			_, verificationError := verifier.Verify(token.SignedString)
+			_, cancel, verificationError := verifier.Verify(token.SignedString)
+			defer cancel()
 			if tt.wantErr {
 				require.Error(t, verificationError)
 			} else {
@@ -129,6 +132,9 @@ func TestClaimsValidator(t *testing.T) {
 	signerPrivateKey := testutils.RandomPrivateKey(t)
 
 	currentVersion := *testutils.GetLatestVersion(t)
+
+	patch0Version := *semver.New(currentVersion.Major(), currentVersion.Minor(), 0, "", "")
+	version010 := *semver.New(0, 1, 0, "", "")
 
 	tests := []struct {
 		name          string
@@ -156,9 +162,27 @@ func TestClaimsValidator(t *testing.T) {
 			true,
 		},
 		{
+			"future-minor-rejects-us",
+			currentVersion,
+			currentVersion.IncMinor(),
+			true,
+		},
+		{
 			"future-patch-accepts-us",
 			currentVersion,
 			currentVersion.IncPatch(),
+			false,
+		},
+		{
+			"patch-0-accepts-us",
+			currentVersion,
+			patch0Version,
+			false,
+		},
+		{
+			"version-0-1-0-rejects-us",
+			currentVersion,
+			version010,
 			true,
 		},
 	}
@@ -179,7 +203,8 @@ func TestClaimsValidator(t *testing.T) {
 
 			token, err := tokenFactory.CreateToken(uint32(VERIFIER_NODE_ID))
 			require.NoError(t, err)
-			_, verificationError := verifier.Verify(token.SignedString)
+			_, cancel, verificationError := verifier.Verify(token.SignedString)
+			defer cancel()
 			if tt.wantErr {
 				require.Error(t, verificationError)
 			} else {

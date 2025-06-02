@@ -2,6 +2,7 @@ package message_test
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -21,8 +22,7 @@ import (
 )
 
 func TestPublishEnvelope(t *testing.T) {
-	api, db, _, cleanup := apiTestUtils.NewTestReplicationAPIClient(t)
-	defer cleanup()
+	api, db, _ := apiTestUtils.NewTestReplicationAPIClient(t)
 
 	payerEnvelope := envelopeTestUtils.CreatePayerEnvelope(
 		t,
@@ -78,8 +78,7 @@ func TestPublishEnvelope(t *testing.T) {
 }
 
 func TestUnmarshalErrorOnPublish(t *testing.T) {
-	api, _, _, cleanup := apiTestUtils.NewTestReplicationAPIClient(t)
-	defer cleanup()
+	api, _, _ := apiTestUtils.NewTestReplicationAPIClient(t)
 
 	envelope := envelopeTestUtils.CreatePayerEnvelope(
 		t,
@@ -96,8 +95,7 @@ func TestUnmarshalErrorOnPublish(t *testing.T) {
 }
 
 func TestMismatchingAADOriginatorOnPublishNoLongerFails(t *testing.T) {
-	api, _, _, cleanup := apiTestUtils.NewTestReplicationAPIClient(t)
-	defer cleanup()
+	api, _, _ := apiTestUtils.NewTestReplicationAPIClient(t)
 
 	nid := envelopeTestUtils.DefaultClientEnvelopeNodeId + 100
 
@@ -120,8 +118,7 @@ func TestMismatchingAADOriginatorOnPublishNoLongerFails(t *testing.T) {
 }
 
 func TestMismatchingOriginatorOnPublish(t *testing.T) {
-	api, _, _, cleanup := apiTestUtils.NewTestReplicationAPIClient(t)
-	defer cleanup()
+	api, _, _ := apiTestUtils.NewTestReplicationAPIClient(t)
 
 	nid := envelopeTestUtils.DefaultClientEnvelopeNodeId + 100
 
@@ -138,8 +135,7 @@ func TestMismatchingOriginatorOnPublish(t *testing.T) {
 }
 
 func TestMissingTopicOnPublish(t *testing.T) {
-	api, _, _, cleanup := apiTestUtils.NewTestReplicationAPIClient(t)
-	defer cleanup()
+	api, _, _ := apiTestUtils.NewTestReplicationAPIClient(t)
 
 	clientEnv := envelopeTestUtils.CreateClientEnvelope()
 	clientEnv.Aad.TargetTopic = nil
@@ -159,8 +155,7 @@ func TestMissingTopicOnPublish(t *testing.T) {
 }
 
 func TestKeyPackageValidationSuccess(t *testing.T) {
-	api, _, apiMocks, cleanup := apiTestUtils.NewTestReplicationAPIClient(t)
-	defer cleanup()
+	api, _, apiMocks := apiTestUtils.NewTestReplicationAPIClient(t)
 
 	nid := envelopeTestUtils.DefaultClientEnvelopeNodeId
 
@@ -204,9 +199,7 @@ func TestKeyPackageValidationSuccess(t *testing.T) {
 }
 
 func TestKeyPackageValidationFail(t *testing.T) {
-	api, _, apiMocks, cleanup := apiTestUtils.NewTestReplicationAPIClient(t)
-	defer cleanup()
-
+	api, _, apiMocks := apiTestUtils.NewTestReplicationAPIClient(t)
 	nid := envelopeTestUtils.DefaultClientEnvelopeNodeId
 
 	clientEnv := envelopeTestUtils.CreateClientEnvelope(&envelopes.AuthenticatedData{
@@ -245,8 +238,7 @@ func TestKeyPackageValidationFail(t *testing.T) {
 }
 
 func TestPublishEnvelopeBlockchainCursorAhead(t *testing.T) {
-	api, _, _, cleanup := apiTestUtils.NewTestReplicationAPIClient(t)
-	defer cleanup()
+	api, _, _ := apiTestUtils.NewTestReplicationAPIClient(t)
 
 	err := publishPayerEnvelopeWithNodeIDAndCursor(
 		t,
@@ -286,8 +278,7 @@ func publishPayerEnvelopeWithNodeIDAndCursor(
 }
 
 func TestPublishEnvelopeOriginatorUnknown(t *testing.T) {
-	api, _, _, cleanup := apiTestUtils.NewTestReplicationAPIClient(t)
-	defer cleanup()
+	api, _, _ := apiTestUtils.NewTestReplicationAPIClient(t)
 
 	err := publishPayerEnvelopeWithNodeIDAndCursor(
 		t,
@@ -304,8 +295,7 @@ func TestPublishEnvelopeOriginatorUnknown(t *testing.T) {
 }
 
 func TestPublishEnvelopeFees(t *testing.T) {
-	api, db, _, cleanup := apiTestUtils.NewTestReplicationAPIClient(t)
-	defer cleanup()
+	api, db, _ := apiTestUtils.NewTestReplicationAPIClient(t)
 
 	payerEnvelope := envelopeTestUtils.CreatePayerEnvelope(
 		t,
@@ -346,4 +336,85 @@ func TestPublishEnvelopeFees(t *testing.T) {
 		originatorEnv.UnsignedOriginatorEnvelope.CongestionFee(),
 		returnedEnv.UnsignedOriginatorEnvelope.CongestionFee(),
 	)
+}
+
+func TestPublishEnvelopeWithVarExpirations(t *testing.T) {
+	api, _, _ := apiTestUtils.NewTestReplicationAPIClient(t)
+
+	tests := []struct {
+		name        string
+		expiry      uint32
+		wantErr     bool
+		expectedErr string
+	}{
+		{
+			name:        "0 expiry",
+			expiry:      0,
+			wantErr:     true,
+			expectedErr: "invalid expiry retention days",
+		},
+		{
+			name:        "short expiry",
+			expiry:      1,
+			wantErr:     true,
+			expectedErr: "invalid expiry retention days",
+		},
+		{
+			name:    "minimal expiry",
+			expiry:  2,
+			wantErr: false,
+		},
+		{
+			name:    "1 week expiry",
+			expiry:  7,
+			wantErr: false,
+		},
+		{
+			name:    "30 day expiry",
+			expiry:  30,
+			wantErr: false,
+		},
+		{
+			name:    "90 day expiry",
+			expiry:  90,
+			wantErr: false,
+		},
+		{
+			name:        "5 year expiry",
+			expiry:      5 * 365,
+			wantErr:     true,
+			expectedErr: "invalid expiry retention days",
+		},
+		{
+			name:    "infinite expiry",
+			expiry:  math.MaxUint32,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payerEnvelope := envelopeTestUtils.CreatePayerEnvelopeWithExpiration(
+				t,
+				envelopeTestUtils.DefaultClientEnvelopeNodeId,
+				tt.expiry,
+			)
+
+			_, err := api.PublishPayerEnvelopes(
+				context.Background(),
+				&message_api.PublishPayerEnvelopesRequest{
+					PayerEnvelopes: []*envelopes.PayerEnvelope{payerEnvelope},
+				},
+			)
+			if tt.wantErr {
+				if tt.expectedErr == "" {
+					require.NoError(t, err)
+				} else {
+					require.ErrorContains(t, err, tt.expectedErr)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }

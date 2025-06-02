@@ -2,10 +2,11 @@ package db_test
 
 import (
 	"context"
-	xmtpd_db "github.com/xmtp/xmtpd/pkg/db"
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	xmtpd_db "github.com/xmtp/xmtpd/pkg/db"
 
 	"github.com/stretchr/testify/require"
 	"github.com/xmtp/xmtpd/pkg/db/queries"
@@ -38,8 +39,7 @@ func buildParams(
 
 func TestInsertAndIncrement(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 	// Create a payer
@@ -63,13 +63,20 @@ func TestInsertAndIncrement(t *testing.T) {
 		queries.GetPayerUnsettledUsageParams{PayerID: payerID},
 	)
 	require.NoError(t, err)
-	require.Equal(t, payerSpend, int64(100))
+	require.Equal(t, payerSpend.TotalSpendPicodollars, int64(100))
+	require.Equal(t, payerSpend.LastSequenceID, sequenceID)
+
+	originatorCongestion, err := querier.SumOriginatorCongestion(
+		ctx,
+		queries.SumOriginatorCongestionParams{OriginatorID: originatorID},
+	)
+	require.NoError(t, err)
+	require.Equal(t, originatorCongestion, int64(1))
 }
 
 func TestPayerMustExist(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	payerID := testutils.RandomInt32()
 	originatorID := testutils.RandomInt32()
@@ -88,8 +95,7 @@ func TestPayerMustExist(t *testing.T) {
 
 func TestInsertAndIncrementParallel(t *testing.T) {
 	ctx := context.Background()
-	db, _, cleanup := testutils.NewDB(t, ctx)
-	defer cleanup()
+	db, _ := testutils.NewDB(t, ctx)
 
 	querier := queries.New(db)
 	// Create a payer
@@ -130,5 +136,53 @@ func TestInsertAndIncrementParallel(t *testing.T) {
 		queries.GetPayerUnsettledUsageParams{PayerID: payerID},
 	)
 	require.NoError(t, err)
-	require.Equal(t, payerSpend, int64(100))
+	require.Equal(t, payerSpend.TotalSpendPicodollars, int64(100))
+	require.Equal(t, payerSpend.LastSequenceID, sequenceID)
+
+	originatorCongestion, err := querier.SumOriginatorCongestion(
+		ctx,
+		queries.SumOriginatorCongestionParams{OriginatorID: originatorID},
+	)
+	require.NoError(t, err)
+	require.Equal(t, originatorCongestion, int64(1))
+}
+
+func TestInsertAndIncrementWithOutOfOrderSequenceID(t *testing.T) {
+	ctx := context.Background()
+	db, _ := testutils.NewDB(t, ctx)
+
+	querier := queries.New(db)
+
+	payerID := testutils.CreatePayer(t, db, testutils.RandomAddress().Hex())
+	originatorID := testutils.RandomInt32()
+	sequenceID := int64(10)
+
+	insertParams, incrementParams := buildParams(payerID, originatorID, sequenceID, 100)
+
+	_, err := xmtpd_db.InsertGatewayEnvelopeAndIncrementUnsettledUsage(
+		ctx,
+		db,
+		insertParams,
+		incrementParams,
+	)
+	require.NoError(t, err)
+
+	lowerSequenceID := int64(5)
+
+	insertParams, incrementParams = buildParams(payerID, originatorID, lowerSequenceID, 100)
+
+	_, err = xmtpd_db.InsertGatewayEnvelopeAndIncrementUnsettledUsage(
+		ctx,
+		db,
+		insertParams,
+		incrementParams,
+	)
+	require.NoError(t, err)
+
+	payerSpend, err := querier.GetPayerUnsettledUsage(
+		ctx,
+		queries.GetPayerUnsettledUsageParams{PayerID: payerID},
+	)
+	require.NoError(t, err)
+	require.Equal(t, payerSpend.LastSequenceID, sequenceID)
 }
