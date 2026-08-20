@@ -21,7 +21,9 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
+	ReplicationApi_SubscribeOriginators_FullMethodName  = "/xmtp.xmtpv4.message_api.ReplicationApi/SubscribeOriginators"
 	ReplicationApi_SubscribeEnvelopes_FullMethodName    = "/xmtp.xmtpv4.message_api.ReplicationApi/SubscribeEnvelopes"
+	ReplicationApi_SubscribeTopics_FullMethodName       = "/xmtp.xmtpv4.message_api.ReplicationApi/SubscribeTopics"
 	ReplicationApi_QueryEnvelopes_FullMethodName        = "/xmtp.xmtpv4.message_api.ReplicationApi/QueryEnvelopes"
 	ReplicationApi_PublishPayerEnvelopes_FullMethodName = "/xmtp.xmtpv4.message_api.ReplicationApi/PublishPayerEnvelopes"
 	ReplicationApi_GetInboxIds_FullMethodName           = "/xmtp.xmtpv4.message_api.ReplicationApi/GetInboxIds"
@@ -32,11 +34,26 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ReplicationApiClient interface {
+	// Node-to-node originator subscription
+	SubscribeOriginators(ctx context.Context, in *SubscribeOriginatorsRequest, opts ...grpc.CallOption) (ReplicationApi_SubscribeOriginatorsClient, error)
+	// Deprecated: Do not use.
+	// Deprecated: use SubscribeOriginators for node queries,
+	// QueryApi.SubscribeTopics for client queries
 	SubscribeEnvelopes(ctx context.Context, in *SubscribeEnvelopesRequest, opts ...grpc.CallOption) (ReplicationApi_SubscribeEnvelopesClient, error)
+	// Deprecated: Do not use.
+	// Deprecated: moved to QueryApi
+	SubscribeTopics(ctx context.Context, in *SubscribeTopicsRequest, opts ...grpc.CallOption) (ReplicationApi_SubscribeTopicsClient, error)
+	// Deprecated: Do not use.
+	// Deprecated: moved to QueryApi
 	QueryEnvelopes(ctx context.Context, in *QueryEnvelopesRequest, opts ...grpc.CallOption) (*QueryEnvelopesResponse, error)
+	// Deprecated: Do not use.
+	// Deprecated: moved to PublishApi
 	PublishPayerEnvelopes(ctx context.Context, in *PublishPayerEnvelopesRequest, opts ...grpc.CallOption) (*PublishPayerEnvelopesResponse, error)
+	// Deprecated: Do not use.
+	// Deprecated: moved to QueryApi
 	GetInboxIds(ctx context.Context, in *GetInboxIdsRequest, opts ...grpc.CallOption) (*GetInboxIdsResponse, error)
-	// Get the newest envelope for each topic
+	// Deprecated: Do not use.
+	// Deprecated: moved to QueryApi
 	GetNewestEnvelope(ctx context.Context, in *GetNewestEnvelopeRequest, opts ...grpc.CallOption) (*GetNewestEnvelopeResponse, error)
 }
 
@@ -48,8 +65,41 @@ func NewReplicationApiClient(cc grpc.ClientConnInterface) ReplicationApiClient {
 	return &replicationApiClient{cc}
 }
 
+func (c *replicationApiClient) SubscribeOriginators(ctx context.Context, in *SubscribeOriginatorsRequest, opts ...grpc.CallOption) (ReplicationApi_SubscribeOriginatorsClient, error) {
+	stream, err := c.cc.NewStream(ctx, &ReplicationApi_ServiceDesc.Streams[0], ReplicationApi_SubscribeOriginators_FullMethodName, opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &replicationApiSubscribeOriginatorsClient{stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type ReplicationApi_SubscribeOriginatorsClient interface {
+	Recv() (*SubscribeOriginatorsResponse, error)
+	grpc.ClientStream
+}
+
+type replicationApiSubscribeOriginatorsClient struct {
+	grpc.ClientStream
+}
+
+func (x *replicationApiSubscribeOriginatorsClient) Recv() (*SubscribeOriginatorsResponse, error) {
+	m := new(SubscribeOriginatorsResponse)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// Deprecated: Do not use.
 func (c *replicationApiClient) SubscribeEnvelopes(ctx context.Context, in *SubscribeEnvelopesRequest, opts ...grpc.CallOption) (ReplicationApi_SubscribeEnvelopesClient, error) {
-	stream, err := c.cc.NewStream(ctx, &ReplicationApi_ServiceDesc.Streams[0], ReplicationApi_SubscribeEnvelopes_FullMethodName, opts...)
+	stream, err := c.cc.NewStream(ctx, &ReplicationApi_ServiceDesc.Streams[1], ReplicationApi_SubscribeEnvelopes_FullMethodName, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -80,6 +130,40 @@ func (x *replicationApiSubscribeEnvelopesClient) Recv() (*SubscribeEnvelopesResp
 	return m, nil
 }
 
+// Deprecated: Do not use.
+func (c *replicationApiClient) SubscribeTopics(ctx context.Context, in *SubscribeTopicsRequest, opts ...grpc.CallOption) (ReplicationApi_SubscribeTopicsClient, error) {
+	stream, err := c.cc.NewStream(ctx, &ReplicationApi_ServiceDesc.Streams[2], ReplicationApi_SubscribeTopics_FullMethodName, opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &replicationApiSubscribeTopicsClient{stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type ReplicationApi_SubscribeTopicsClient interface {
+	Recv() (*SubscribeTopicsResponse, error)
+	grpc.ClientStream
+}
+
+type replicationApiSubscribeTopicsClient struct {
+	grpc.ClientStream
+}
+
+func (x *replicationApiSubscribeTopicsClient) Recv() (*SubscribeTopicsResponse, error) {
+	m := new(SubscribeTopicsResponse)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// Deprecated: Do not use.
 func (c *replicationApiClient) QueryEnvelopes(ctx context.Context, in *QueryEnvelopesRequest, opts ...grpc.CallOption) (*QueryEnvelopesResponse, error) {
 	out := new(QueryEnvelopesResponse)
 	err := c.cc.Invoke(ctx, ReplicationApi_QueryEnvelopes_FullMethodName, in, out, opts...)
@@ -89,6 +173,7 @@ func (c *replicationApiClient) QueryEnvelopes(ctx context.Context, in *QueryEnve
 	return out, nil
 }
 
+// Deprecated: Do not use.
 func (c *replicationApiClient) PublishPayerEnvelopes(ctx context.Context, in *PublishPayerEnvelopesRequest, opts ...grpc.CallOption) (*PublishPayerEnvelopesResponse, error) {
 	out := new(PublishPayerEnvelopesResponse)
 	err := c.cc.Invoke(ctx, ReplicationApi_PublishPayerEnvelopes_FullMethodName, in, out, opts...)
@@ -98,6 +183,7 @@ func (c *replicationApiClient) PublishPayerEnvelopes(ctx context.Context, in *Pu
 	return out, nil
 }
 
+// Deprecated: Do not use.
 func (c *replicationApiClient) GetInboxIds(ctx context.Context, in *GetInboxIdsRequest, opts ...grpc.CallOption) (*GetInboxIdsResponse, error) {
 	out := new(GetInboxIdsResponse)
 	err := c.cc.Invoke(ctx, ReplicationApi_GetInboxIds_FullMethodName, in, out, opts...)
@@ -107,6 +193,7 @@ func (c *replicationApiClient) GetInboxIds(ctx context.Context, in *GetInboxIdsR
 	return out, nil
 }
 
+// Deprecated: Do not use.
 func (c *replicationApiClient) GetNewestEnvelope(ctx context.Context, in *GetNewestEnvelopeRequest, opts ...grpc.CallOption) (*GetNewestEnvelopeResponse, error) {
 	out := new(GetNewestEnvelopeResponse)
 	err := c.cc.Invoke(ctx, ReplicationApi_GetNewestEnvelope_FullMethodName, in, out, opts...)
@@ -120,11 +207,26 @@ func (c *replicationApiClient) GetNewestEnvelope(ctx context.Context, in *GetNew
 // All implementations must embed UnimplementedReplicationApiServer
 // for forward compatibility
 type ReplicationApiServer interface {
+	// Node-to-node originator subscription
+	SubscribeOriginators(*SubscribeOriginatorsRequest, ReplicationApi_SubscribeOriginatorsServer) error
+	// Deprecated: Do not use.
+	// Deprecated: use SubscribeOriginators for node queries,
+	// QueryApi.SubscribeTopics for client queries
 	SubscribeEnvelopes(*SubscribeEnvelopesRequest, ReplicationApi_SubscribeEnvelopesServer) error
+	// Deprecated: Do not use.
+	// Deprecated: moved to QueryApi
+	SubscribeTopics(*SubscribeTopicsRequest, ReplicationApi_SubscribeTopicsServer) error
+	// Deprecated: Do not use.
+	// Deprecated: moved to QueryApi
 	QueryEnvelopes(context.Context, *QueryEnvelopesRequest) (*QueryEnvelopesResponse, error)
+	// Deprecated: Do not use.
+	// Deprecated: moved to PublishApi
 	PublishPayerEnvelopes(context.Context, *PublishPayerEnvelopesRequest) (*PublishPayerEnvelopesResponse, error)
+	// Deprecated: Do not use.
+	// Deprecated: moved to QueryApi
 	GetInboxIds(context.Context, *GetInboxIdsRequest) (*GetInboxIdsResponse, error)
-	// Get the newest envelope for each topic
+	// Deprecated: Do not use.
+	// Deprecated: moved to QueryApi
 	GetNewestEnvelope(context.Context, *GetNewestEnvelopeRequest) (*GetNewestEnvelopeResponse, error)
 	mustEmbedUnimplementedReplicationApiServer()
 }
@@ -133,8 +235,14 @@ type ReplicationApiServer interface {
 type UnimplementedReplicationApiServer struct {
 }
 
+func (UnimplementedReplicationApiServer) SubscribeOriginators(*SubscribeOriginatorsRequest, ReplicationApi_SubscribeOriginatorsServer) error {
+	return status.Errorf(codes.Unimplemented, "method SubscribeOriginators not implemented")
+}
 func (UnimplementedReplicationApiServer) SubscribeEnvelopes(*SubscribeEnvelopesRequest, ReplicationApi_SubscribeEnvelopesServer) error {
 	return status.Errorf(codes.Unimplemented, "method SubscribeEnvelopes not implemented")
+}
+func (UnimplementedReplicationApiServer) SubscribeTopics(*SubscribeTopicsRequest, ReplicationApi_SubscribeTopicsServer) error {
+	return status.Errorf(codes.Unimplemented, "method SubscribeTopics not implemented")
 }
 func (UnimplementedReplicationApiServer) QueryEnvelopes(context.Context, *QueryEnvelopesRequest) (*QueryEnvelopesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method QueryEnvelopes not implemented")
@@ -161,6 +269,27 @@ func RegisterReplicationApiServer(s grpc.ServiceRegistrar, srv ReplicationApiSer
 	s.RegisterService(&ReplicationApi_ServiceDesc, srv)
 }
 
+func _ReplicationApi_SubscribeOriginators_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(SubscribeOriginatorsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ReplicationApiServer).SubscribeOriginators(m, &replicationApiSubscribeOriginatorsServer{stream})
+}
+
+type ReplicationApi_SubscribeOriginatorsServer interface {
+	Send(*SubscribeOriginatorsResponse) error
+	grpc.ServerStream
+}
+
+type replicationApiSubscribeOriginatorsServer struct {
+	grpc.ServerStream
+}
+
+func (x *replicationApiSubscribeOriginatorsServer) Send(m *SubscribeOriginatorsResponse) error {
+	return x.ServerStream.SendMsg(m)
+}
+
 func _ReplicationApi_SubscribeEnvelopes_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(SubscribeEnvelopesRequest)
 	if err := stream.RecvMsg(m); err != nil {
@@ -179,6 +308,27 @@ type replicationApiSubscribeEnvelopesServer struct {
 }
 
 func (x *replicationApiSubscribeEnvelopesServer) Send(m *SubscribeEnvelopesResponse) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func _ReplicationApi_SubscribeTopics_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(SubscribeTopicsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ReplicationApiServer).SubscribeTopics(m, &replicationApiSubscribeTopicsServer{stream})
+}
+
+type ReplicationApi_SubscribeTopicsServer interface {
+	Send(*SubscribeTopicsResponse) error
+	grpc.ServerStream
+}
+
+type replicationApiSubscribeTopicsServer struct {
+	grpc.ServerStream
+}
+
+func (x *replicationApiSubscribeTopicsServer) Send(m *SubscribeTopicsResponse) error {
 	return x.ServerStream.SendMsg(m)
 }
 
@@ -280,8 +430,18 @@ var ReplicationApi_ServiceDesc = grpc.ServiceDesc{
 	},
 	Streams: []grpc.StreamDesc{
 		{
+			StreamName:    "SubscribeOriginators",
+			Handler:       _ReplicationApi_SubscribeOriginators_Handler,
+			ServerStreams: true,
+		},
+		{
 			StreamName:    "SubscribeEnvelopes",
 			Handler:       _ReplicationApi_SubscribeEnvelopes_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "SubscribeTopics",
+			Handler:       _ReplicationApi_SubscribeTopics_Handler,
 			ServerStreams: true,
 		},
 	},

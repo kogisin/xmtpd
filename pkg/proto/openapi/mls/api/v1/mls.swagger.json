@@ -16,6 +16,71 @@
     "application/json"
   ],
   "paths": {
+    "/mls/v1/batch-publish-commit-log": {
+      "post": {
+        "operationId": "MlsApi_BatchPublishCommitLog",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "type": "object",
+              "properties": {}
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/v1BatchPublishCommitLogRequest"
+            }
+          }
+        ],
+        "tags": [
+          "MlsApi"
+        ]
+      }
+    },
+    "/mls/v1/batch-query-commit-log": {
+      "post": {
+        "operationId": "MlsApi_BatchQueryCommitLog",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1BatchQueryCommitLogResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/v1BatchQueryCommitLogRequest"
+            }
+          }
+        ],
+        "tags": [
+          "MlsApi"
+        ]
+      }
+    },
     "/mls/v1/fetch-key-packages": {
       "post": {
         "summary": "Get one or more Key Packages by installation_id",
@@ -75,6 +140,48 @@
             "schema": {
               "$ref": "#/definitions/xmtpmlsapiv1GetIdentityUpdatesRequest"
             }
+          }
+        ],
+        "tags": [
+          "MlsApi"
+        ]
+      }
+    },
+    "/mls/v1/get-newest-group-message": {
+      "get": {
+        "operationId": "MlsApi_GetNewestGroupMessage",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1GetNewestGroupMessageResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "groupIds",
+            "description": "Get the newest message from each of these topics",
+            "in": "query",
+            "required": false,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "byte"
+            },
+            "collectionFormat": "multi"
+          },
+          {
+            "name": "includeContent",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
           }
         ],
         "tags": [
@@ -488,6 +595,31 @@
       },
       "description": "ECDSA signature bytes and the recovery bit\nproduced by xmtp-js::PublicKey.signWithWallet function, i.e.\nEIP-191 signature of a \"Create Identity\" message with the key embedded.\nUsed to sign identity keys."
     },
+    "V1Messages": {
+      "type": "object",
+      "properties": {
+        "groupMessages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/apiv1GroupMessage"
+          }
+        },
+        "welcomeMessages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1WelcomeMessage"
+          }
+        },
+        "mutateId": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The catch-up wave that produced this frame: the Mutate's mutate_id\nfor wave replay, 0 for live tail."
+        }
+      },
+      "description": "A batch of new messages; group and welcome messages share the stream,\ndepending on which subscriptions are active. A frame belongs to exactly\none catch-up wave or to live — the server never mixes lanes, or two\nwaves, in one frame — and each lane is delivered in ascending id order\nper message kind (live: across all live topics on the stream; a wave:\nacross the wave's topics, one merged cursor-ordered pass)."
+    },
     "apiv1GroupMessage": {
       "type": "object",
       "properties": {
@@ -497,14 +629,227 @@
       },
       "title": "Full representation of a group message"
     },
+    "apiv1Ping": {
+      "type": "object",
+      "properties": {
+        "nonce": {
+          "type": "string",
+          "format": "uint64"
+        }
+      },
+      "description": "Liveness challenge/response, shared across versions. Either peer MAY send a\nPing; the receiver MUST reply with a Pong echoing the nonce. The sender closes\nthe stream if no Pong arrives within its deadline — how a node reaps a vanished\npeer (e.g. a mobile client the OS suspended behind a proxy that still ACKs the\ntransport)."
+    },
+    "apiv1Pong": {
+      "type": "object",
+      "properties": {
+        "nonce": {
+          "type": "string",
+          "format": "uint64",
+          "title": "echoes the nonce of the Ping it answers"
+        }
+      }
+    },
+    "apiv1SubscribeRequestV1": {
+      "type": "object",
+      "properties": {
+        "mutate": {
+          "$ref": "#/definitions/apiv1SubscribeRequestV1Mutate"
+        },
+        "ping": {
+          "$ref": "#/definitions/apiv1Ping",
+          "title": "liveness challenge (e.g. probe the link after resuming)"
+        },
+        "pong": {
+          "$ref": "#/definitions/apiv1Pong",
+          "title": "answer to a server Ping"
+        }
+      }
+    },
+    "apiv1SubscribeRequestV1Mutate": {
+      "type": "object",
+      "properties": {
+        "adds": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/apiv1SubscribeRequestV1MutateSubscription"
+          },
+          "title": "begin delivering these topics"
+        },
+        "removes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "byte"
+          },
+          "title": "stop delivering; clears the topic's cursor floor so a re-add replays"
+        },
+        "historyOnly": {
+          "type": "boolean",
+          "description": "Catch this Mutate's adds up — history, TopicsLive markers, and the\nwave's CatchupComplete — but do NOT register them for live delivery.\nThe markers then mean \"you have everything as of the wave's start\";\nlater messages arrive on no lane of this stream. Combined with\nhalf-closing the request stream, this is the\nbounded catch-up (\"sync\") mode: the server finishes the wave and then\ncloses the stream itself. Removals in the Mutate are unaffected."
+        },
+        "mutateId": {
+          "type": "string",
+          "format": "uint64",
+          "description": "Client-chosen correlation id: echoed on this wave's CatchupComplete,\nand stamped on every delivery frame of the wave's catch-up replay\n(Messages.mutate_id). MUST be nonzero when adds are present (0 is the\nlive tag), and MUST NOT match the mutate_id of a wave still in flight\non the stream (an in-flight collision would make two waves' frames and\ncompletions indistinguishable) — either violation fails the stream\nwith INVALID_ARGUMENT. SHOULD be unique per stream so completed waves\nstay attributable too."
+        }
+      },
+      "description": "Add and/or remove subscriptions in place (applied atomically per frame).\nTopics use the kind-prefixed binary representation shared with the\ndecentralized backend (XIP-49 §3.3.2): the first byte is the topic kind,\nthe remainder is the identifier. This RPC initially serves\nTOPIC_KIND_GROUP_MESSAGES_V1 (0x00, identifier = group_id) and\nTOPIC_KIND_WELCOME_MESSAGES_V1 (0x01, identifier = installation_key);\na topic whose kind the node does not serve fails the stream with\nINVALID_ARGUMENT. Future kinds (key packages, identity updates) are\nadopted via the capabilities advertised on Started."
+    },
+    "apiv1SubscribeRequestV1MutateSubscription": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string",
+          "format": "byte"
+        },
+        "idCursor": {
+          "type": "string",
+          "format": "uint64",
+          "description": "Deliver ids greater than this; 0 = from the beginning. For a newly\njoined group, a client SHOULD seed this from the welcome's encrypted\nWelcomeMetadata.message_cursor so a new membership does not refetch\npre-join history it cannot decrypt; for a new installation's welcome\ntopic, 0 is how pending welcomes are collected."
+        }
+      },
+      "description": "A topic to subscribe, with the cursor to resume from."
+    },
+    "apiv1SubscribeResponse": {
+      "type": "object",
+      "properties": {
+        "v1": {
+          "$ref": "#/definitions/apiv1SubscribeResponseV1"
+        }
+      },
+      "description": "Server -\u003e client."
+    },
+    "apiv1SubscribeResponseV1": {
+      "type": "object",
+      "properties": {
+        "messages": {
+          "$ref": "#/definitions/V1Messages"
+        },
+        "started": {
+          "$ref": "#/definitions/apiv1SubscribeResponseV1Started",
+          "title": "sent once, immediately on open, before any catch-up"
+        },
+        "ping": {
+          "$ref": "#/definitions/apiv1Ping",
+          "title": "idle liveness challenge; receiver MUST answer with Pong"
+        },
+        "pong": {
+          "$ref": "#/definitions/apiv1Pong",
+          "title": "answer to a client Ping"
+        },
+        "topicsLive": {
+          "$ref": "#/definitions/apiv1SubscribeResponseV1TopicsLive",
+          "title": "no more replay for these topics; live begins after CatchupComplete"
+        },
+        "catchupComplete": {
+          "$ref": "#/definitions/apiv1SubscribeResponseV1CatchupComplete",
+          "title": "acks a Mutate; wave completion if it started one"
+        }
+      }
+    },
+    "apiv1SubscribeResponseV1Capability": {
+      "type": "string",
+      "enum": [
+        "CAPABILITY_UNSPECIFIED"
+      ],
+      "default": "CAPABILITY_UNSPECIFIED",
+      "description": "Optional per-stream protocol features (none defined yet; future\nrevisions add values, e.g. fetch-over-stream lookups answered with the\nsame read view that feeds the stream, or new streamable topic kinds)."
+    },
+    "apiv1SubscribeResponseV1CatchupComplete": {
+      "type": "object",
+      "properties": {
+        "mutateId": {
+          "type": "string",
+          "format": "uint64",
+          "title": "echoes the Mutate; 0 only if a waveless Mutate carried 0"
+        }
+      },
+      "description": "Sent once per Mutate: at wave completion (after the wave's last\nTopicsLive) for a Mutate that started a catch-up \"wave\", immediately for\none that did not (nothing added — removes-only or empty — or every add\na no-op). Also the catch-up\nseam: live frames (mutate_id 0) for the wave's topics begin only after\nthis frame."
+    },
+    "apiv1SubscribeResponseV1Started": {
+      "type": "object",
+      "properties": {
+        "keepaliveIntervalMs": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The server's ping cadence (ms): the basis for the client's staleness\nthreshold and the server's reap deadline."
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/apiv1SubscribeResponseV1Capability"
+          },
+          "description": "Optional protocol features the node supports on this stream. The node\nsilently ignores request types it does not understand, so a client\nMUST NOT send an optional request type whose capability the node did\nnot advertise (it would hang waiting on a response that never comes)."
+        }
+      },
+      "description": "The first frame on every stream."
+    },
+    "apiv1SubscribeResponseV1TopicsLive": {
+      "type": "object",
+      "properties": {
+        "topics": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "byte"
+          },
+          "title": "kind-prefixed topics done replaying"
+        }
+      },
+      "description": "Emitted when topics finish catch-up, AFTER the last history frame for\nthem — including messages that arrived mid-wave and were folded into it,\nwhich were equally historical from the client's perspective — so no\nfurther replay for a listed topic follows; its live (mutate_id 0) frames\nbegin after the wave's CatchupComplete. Informational only: delivery\ncorrectness (no duplicates, no gaps) never depends on it. Re-adding a\ntopic re-runs catch-up and re-emits it; receivers treat it idempotently."
+    },
+    "associationsRecoverableEd25519Signature": {
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "type": "string",
+          "format": "byte",
+          "title": "64 bytes [R(32 bytes) || S(32 bytes)]"
+        },
+        "publicKey": {
+          "type": "string",
+          "format": "byte",
+          "title": "32 bytes"
+        }
+      },
+      "title": "EdDSA signature for 25519"
+    },
+    "message_contentsCommitLogEntry": {
+      "type": "object",
+      "properties": {
+        "sequenceId": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "serializedCommitLogEntry": {
+          "type": "string",
+          "format": "byte"
+        },
+        "signature": {
+          "$ref": "#/definitions/associationsRecoverableEd25519Signature"
+        }
+      }
+    },
+    "message_contentsWelcomePointerWrapperAlgorithm": {
+      "type": "string",
+      "enum": [
+        "WELCOME_POINTER_WRAPPER_ALGORITHM_UNSPECIFIED",
+        "WELCOME_POINTER_WRAPPER_ALGORITHM_XWING_MLKEM_768_DRAFT_6"
+      ],
+      "default": "WELCOME_POINTER_WRAPPER_ALGORITHM_UNSPECIFIED",
+      "title": "MUST match the WelcomeWrapperAlgorithm enum values without 25519 so that the i32 transformations are compatible"
+    },
     "message_contentsWelcomeWrapperAlgorithm": {
       "type": "string",
       "enum": [
         "WELCOME_WRAPPER_ALGORITHM_UNSPECIFIED",
         "WELCOME_WRAPPER_ALGORITHM_CURVE25519",
-        "WELCOME_WRAPPER_ALGORITHM_XWING_MLKEM_768_DRAFT_6"
+        "WELCOME_WRAPPER_ALGORITHM_XWING_MLKEM_768_DRAFT_6",
+        "WELCOME_WRAPPER_ALGORITHM_SYMMETRIC_KEY"
       ],
       "default": "WELCOME_WRAPPER_ALGORITHM_UNSPECIFIED",
+      "description": "- WELCOME_WRAPPER_ALGORITHM_SYMMETRIC_KEY: Only used for WelcomePointee's",
       "title": "Describes the algorithm used to encrypt the Welcome Wrapper"
     },
     "mlsapiv1PagingInfo": {
@@ -562,6 +907,42 @@
         }
       }
     },
+    "v1BatchPublishCommitLogRequest": {
+      "type": "object",
+      "properties": {
+        "requests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1PublishCommitLogRequest"
+          }
+        }
+      }
+    },
+    "v1BatchQueryCommitLogRequest": {
+      "type": "object",
+      "properties": {
+        "requests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1QueryCommitLogRequest"
+          }
+        }
+      }
+    },
+    "v1BatchQueryCommitLogResponse": {
+      "type": "object",
+      "properties": {
+        "responses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1QueryCommitLogResponse"
+          }
+        }
+      }
+    },
     "v1FetchKeyPackagesRequest": {
       "type": "object",
       "properties": {
@@ -599,6 +980,28 @@
         }
       },
       "title": "An individual key package"
+    },
+    "v1GetNewestGroupMessageResponse": {
+      "type": "object",
+      "properties": {
+        "responses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1GetNewestGroupMessageResponseResponse"
+          }
+        }
+      },
+      "title": "Returns a list of responses that will always be the same length as the\nrequest"
+    },
+    "v1GetNewestGroupMessageResponseResponse": {
+      "type": "object",
+      "properties": {
+        "groupMessage": {
+          "$ref": "#/definitions/apiv1GroupMessage",
+          "title": "If no message is found on the topic, will be nil"
+        }
+      }
     },
     "v1GroupMessageInput": {
       "type": "object",
@@ -652,6 +1055,9 @@
         },
         "shouldPush": {
           "type": "boolean"
+        },
+        "isCommit": {
+          "type": "boolean"
         }
       },
       "title": "Version 1 of the GroupMessage format"
@@ -667,6 +1073,53 @@
       },
       "description": "This would be a serialized MLS key package that the node would\n parse, validate, and then store.",
       "title": "A wrapper around the Key Package bytes"
+    },
+    "v1PublishCommitLogRequest": {
+      "type": "object",
+      "properties": {
+        "groupId": {
+          "type": "string",
+          "format": "byte"
+        },
+        "serializedCommitLogEntry": {
+          "type": "string",
+          "format": "byte"
+        },
+        "signature": {
+          "$ref": "#/definitions/associationsRecoverableEd25519Signature"
+        }
+      }
+    },
+    "v1QueryCommitLogRequest": {
+      "type": "object",
+      "properties": {
+        "groupId": {
+          "type": "string",
+          "format": "byte"
+        },
+        "pagingInfo": {
+          "$ref": "#/definitions/mlsapiv1PagingInfo"
+        }
+      }
+    },
+    "v1QueryCommitLogResponse": {
+      "type": "object",
+      "properties": {
+        "groupId": {
+          "type": "string",
+          "format": "byte"
+        },
+        "commitLogEntries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/message_contentsCommitLogEntry"
+          }
+        },
+        "pagingInfo": {
+          "$ref": "#/definitions/mlsapiv1PagingInfo"
+        }
+      }
     },
     "v1QueryGroupMessagesRequest": {
       "type": "object",
@@ -861,6 +1314,9 @@
       "properties": {
         "v1": {
           "$ref": "#/definitions/v1WelcomeMessageV1"
+        },
+        "welcomePointer": {
+          "$ref": "#/definitions/v1WelcomeMessageWelcomePointer"
         }
       },
       "title": "Full representation of a welcome message"
@@ -870,6 +1326,9 @@
       "properties": {
         "v1": {
           "$ref": "#/definitions/v1WelcomeMessageInputV1"
+        },
+        "welcomePointer": {
+          "$ref": "#/definitions/v1WelcomeMessageInputWelcomePointer"
         }
       },
       "title": "Input type for a welcome message"
@@ -879,21 +1338,55 @@
       "properties": {
         "installationKey": {
           "type": "string",
-          "format": "byte"
+          "format": "byte",
+          "title": "The topic of the welcome message (generally the installation id)"
         },
         "data": {
           "type": "string",
-          "format": "byte"
+          "format": "byte",
+          "title": "An encrypted mls `Welcome` struct"
         },
         "hpkePublicKey": {
           "type": "string",
-          "format": "byte"
+          "format": "byte",
+          "title": "The public key of the welcome message"
         },
         "wrapperAlgorithm": {
-          "$ref": "#/definitions/message_contentsWelcomeWrapperAlgorithm"
+          "$ref": "#/definitions/message_contentsWelcomeWrapperAlgorithm",
+          "title": "The algorithm used to encrypt the welcome message"
+        },
+        "welcomeMetadata": {
+          "type": "string",
+          "format": "byte",
+          "title": "The metadata of the welcome message"
         }
       },
-      "title": "Version 1 of the WelcomeMessageInput format"
+      "title": "Version 1 of the WelcomeMessageInput format, if used as the pointee of a\nWelcomePointer then the hpke_public_key will be unset, and the\nwrapper_algorithm will be WELCOME_WRAPPER_ALGORITHM_SYMMETRIC_KEY"
+    },
+    "v1WelcomeMessageInputWelcomePointer": {
+      "type": "object",
+      "properties": {
+        "installationKey": {
+          "type": "string",
+          "format": "byte",
+          "title": "The topic of the welcome message (generally the installation id)"
+        },
+        "welcomePointer": {
+          "type": "string",
+          "format": "byte",
+          "title": "A WelcomePointer encrypted using the wrapper_algorithm"
+        },
+        "hpkePublicKey": {
+          "type": "string",
+          "format": "byte",
+          "title": "The public key used to encrypt the welcome pointer"
+        },
+        "wrapperAlgorithm": {
+          "$ref": "#/definitions/message_contentsWelcomePointerWrapperAlgorithm",
+          "title": "The algorithm used to encrypt the welcome pointer"
+        }
+      },
+      "title": "Version 2 of the WelcomeMessageInput format which uses a WelcomePointer\nto point to the welcome message for several installations at once"
     },
     "v1WelcomeMessageV1": {
       "type": "object",
@@ -920,9 +1413,45 @@
         },
         "wrapperAlgorithm": {
           "$ref": "#/definitions/message_contentsWelcomeWrapperAlgorithm"
+        },
+        "welcomeMetadata": {
+          "type": "string",
+          "format": "byte"
         }
       },
       "title": "Version 1 of the WelcomeMessage format"
+    },
+    "v1WelcomeMessageWelcomePointer": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "createdNs": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "installationKey": {
+          "type": "string",
+          "format": "byte",
+          "title": "The topic of the welcome message (generally the installation id)"
+        },
+        "welcomePointer": {
+          "type": "string",
+          "format": "byte",
+          "title": "A WelcomePointer encrypted using the algorithm specified by\nwrapper_algorithm"
+        },
+        "hpkePublicKey": {
+          "type": "string",
+          "format": "byte",
+          "title": "The public key used to encrypt the welcome pointer"
+        },
+        "wrapperAlgorithm": {
+          "$ref": "#/definitions/message_contentsWelcomePointerWrapperAlgorithm",
+          "title": "The algorithm used to encrypt the welcome pointer"
+        }
+      }
     },
     "xmtpmessage_contentsSignature": {
       "type": "object",
