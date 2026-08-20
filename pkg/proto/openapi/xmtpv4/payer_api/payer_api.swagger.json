@@ -15,73 +15,7 @@
   "produces": [
     "application/json"
   ],
-  "paths": {
-    "/mls/v2/payer/get-reader-node": {
-      "post": {
-        "operationId": "PayerApi_GetReaderNode",
-        "responses": {
-          "200": {
-            "description": "A successful response.",
-            "schema": {
-              "$ref": "#/definitions/payer_apiGetReaderNodeResponse"
-            }
-          },
-          "default": {
-            "description": "An unexpected error response.",
-            "schema": {
-              "$ref": "#/definitions/rpcStatus"
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "body",
-            "in": "body",
-            "required": true,
-            "schema": {
-              "$ref": "#/definitions/payer_apiGetReaderNodeRequest"
-            }
-          }
-        ],
-        "tags": [
-          "PayerApi"
-        ]
-      }
-    },
-    "/mls/v2/payer/publish-client-envelopes": {
-      "post": {
-        "summary": "Publish envelope",
-        "operationId": "PayerApi_PublishClientEnvelopes",
-        "responses": {
-          "200": {
-            "description": "A successful response.",
-            "schema": {
-              "$ref": "#/definitions/payer_apiPublishClientEnvelopesResponse"
-            }
-          },
-          "default": {
-            "description": "An unexpected error response.",
-            "schema": {
-              "$ref": "#/definitions/rpcStatus"
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "body",
-            "in": "body",
-            "required": true,
-            "schema": {
-              "$ref": "#/definitions/payer_apiPublishClientEnvelopesRequest"
-            }
-          }
-        ],
-        "tags": [
-          "PayerApi"
-        ]
-      }
-    }
-  },
+  "paths": {},
   "definitions": {
     "SignatureECDSACompact": {
       "type": "object",
@@ -351,19 +285,14 @@
     "envelopesAuthenticatedData": {
       "type": "object",
       "properties": {
-        "targetOriginator": {
-          "type": "integer",
-          "format": "int64"
-        },
         "targetTopic": {
           "type": "string",
-          "format": "byte"
+          "format": "byte",
+          "title": "Do NOT reuse tag 1 — previously used by target_originator"
         },
         "dependsOn": {
-          "$ref": "#/definitions/xmtpv4envelopesCursor"
-        },
-        "isCommit": {
-          "type": "boolean"
+          "$ref": "#/definitions/xmtpv4envelopesCursor",
+          "title": "Do NOT reuse tag 4 — previously used by is_commit"
         }
       },
       "description": "Data visible to the server that has been authenticated by the client."
@@ -404,6 +333,18 @@
         }
       }
     },
+    "envelopesNodeSignature": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "signature": {
+          "$ref": "#/definitions/associationsRecoverableEcdsaSignature"
+        }
+      }
+    },
     "envelopesOriginatorEnvelope": {
       "type": "object",
       "properties": {
@@ -439,6 +380,11 @@
           "format": "uint64",
           "title": "The sequence_id that the report ends at [inclusive]"
         },
+        "endMinuteSinceEpoch": {
+          "type": "integer",
+          "format": "int64",
+          "title": "The end timestamp of the report"
+        },
         "payersMerkleRoot": {
           "type": "string",
           "format": "byte",
@@ -464,7 +410,7 @@
           "title": "The ID of the report, determined by hashing the report contents"
         },
         "signature": {
-          "$ref": "#/definitions/associationsRecoverableEcdsaSignature",
+          "$ref": "#/definitions/envelopesNodeSignature",
           "title": "The signature of the attester"
         }
       },
@@ -506,41 +452,34 @@
       },
       "title": "SignedPublicKey"
     },
+    "message_contentsWelcomePointerWrapperAlgorithm": {
+      "type": "string",
+      "enum": [
+        "WELCOME_POINTER_WRAPPER_ALGORITHM_UNSPECIFIED",
+        "WELCOME_POINTER_WRAPPER_ALGORITHM_XWING_MLKEM_768_DRAFT_6"
+      ],
+      "default": "WELCOME_POINTER_WRAPPER_ALGORITHM_UNSPECIFIED",
+      "title": "MUST match the WelcomeWrapperAlgorithm enum values without 25519 so that the i32 transformations are compatible"
+    },
     "message_contentsWelcomeWrapperAlgorithm": {
       "type": "string",
       "enum": [
         "WELCOME_WRAPPER_ALGORITHM_UNSPECIFIED",
         "WELCOME_WRAPPER_ALGORITHM_CURVE25519",
-        "WELCOME_WRAPPER_ALGORITHM_XWING_MLKEM_768_DRAFT_6"
+        "WELCOME_WRAPPER_ALGORITHM_XWING_MLKEM_768_DRAFT_6",
+        "WELCOME_WRAPPER_ALGORITHM_SYMMETRIC_KEY"
       ],
       "default": "WELCOME_WRAPPER_ALGORITHM_UNSPECIFIED",
+      "description": "- WELCOME_WRAPPER_ALGORITHM_SYMMETRIC_KEY: Only used for WelcomePointee's",
       "title": "Describes the algorithm used to encrypt the Welcome Wrapper"
     },
-    "payer_apiGetReaderNodeRequest": {
-      "type": "object"
-    },
-    "payer_apiGetReaderNodeResponse": {
+    "payer_apiGetNodesResponse": {
       "type": "object",
       "properties": {
-        "readerNodeUrl": {
-          "type": "string"
-        },
-        "backupNodeUrls": {
-          "type": "array",
-          "items": {
+        "nodes": {
+          "type": "object",
+          "additionalProperties": {
             "type": "string"
-          }
-        }
-      }
-    },
-    "payer_apiPublishClientEnvelopesRequest": {
-      "type": "object",
-      "properties": {
-        "envelopes": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "$ref": "#/definitions/envelopesClientEnvelope"
           }
         }
       }
@@ -642,6 +581,9 @@
       "properties": {
         "v1": {
           "$ref": "#/definitions/v1WelcomeMessageInputV1"
+        },
+        "welcomePointer": {
+          "$ref": "#/definitions/v1WelcomeMessageInputWelcomePointer"
         }
       },
       "title": "Input type for a welcome message"
@@ -651,21 +593,55 @@
       "properties": {
         "installationKey": {
           "type": "string",
-          "format": "byte"
+          "format": "byte",
+          "title": "The topic of the welcome message (generally the installation id)"
         },
         "data": {
           "type": "string",
-          "format": "byte"
+          "format": "byte",
+          "title": "An encrypted mls `Welcome` struct"
         },
         "hpkePublicKey": {
           "type": "string",
-          "format": "byte"
+          "format": "byte",
+          "title": "The public key of the welcome message"
         },
         "wrapperAlgorithm": {
-          "$ref": "#/definitions/message_contentsWelcomeWrapperAlgorithm"
+          "$ref": "#/definitions/message_contentsWelcomeWrapperAlgorithm",
+          "title": "The algorithm used to encrypt the welcome message"
+        },
+        "welcomeMetadata": {
+          "type": "string",
+          "format": "byte",
+          "title": "The metadata of the welcome message"
         }
       },
-      "title": "Version 1 of the WelcomeMessageInput format"
+      "title": "Version 1 of the WelcomeMessageInput format, if used as the pointee of a\nWelcomePointer then the hpke_public_key will be unset, and the\nwrapper_algorithm will be WELCOME_WRAPPER_ALGORITHM_SYMMETRIC_KEY"
+    },
+    "v1WelcomeMessageInputWelcomePointer": {
+      "type": "object",
+      "properties": {
+        "installationKey": {
+          "type": "string",
+          "format": "byte",
+          "title": "The topic of the welcome message (generally the installation id)"
+        },
+        "welcomePointer": {
+          "type": "string",
+          "format": "byte",
+          "title": "A WelcomePointer encrypted using the wrapper_algorithm"
+        },
+        "hpkePublicKey": {
+          "type": "string",
+          "format": "byte",
+          "title": "The public key used to encrypt the welcome pointer"
+        },
+        "wrapperAlgorithm": {
+          "$ref": "#/definitions/message_contentsWelcomePointerWrapperAlgorithm",
+          "title": "The algorithm used to encrypt the welcome pointer"
+        }
+      },
+      "title": "Version 2 of the WelcomeMessageInput format which uses a WelcomePointer\nto point to the welcome message for several installations at once"
     },
     "xmtpmessage_contentsSignature": {
       "type": "object",
